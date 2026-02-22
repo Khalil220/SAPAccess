@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>SAPAccess</AssemblyName>
+    <RootNamespace>SAPAccess</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <!-- Set to true once interop DLLs are available in ../../interop/ -->
+    <HasInterop Condition="Exists('$(MSBuildThisFileDirectory)../../interop/UnityEngine.CoreModule.dll')">true</HasInterop>
+    <HasInterop Condition="!Exists('$(MSBuildThisFileDirectory)../../interop/UnityEngine.CoreModule.dll')">false</HasInterop>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BepInEx.Unity.IL2CPP" Version="6.0.0-be.753" />
+    <PackageReference Include="BepInEx.PluginInfoProps" Version="2.1.0" />
+  </ItemGroup>
+
+  <!-- Use stubs when interop DLLs are not available -->
+  <ItemGroup Condition="'$(HasInterop)' == 'false'">
+    <Compile Include="../../stubs/**/*.cs" LinkBase="Stubs" />
+  </ItemGroup>
+
+  <!-- Reference interop DLLs when available -->
+  <Target Name="AddInteropReferences" BeforeTargets="ResolveAssemblyReferences"
+          Condition="'$(HasInterop)' == 'true'">
+    <ItemGroup>
+      <Reference Include="$(MSBuildThisFileDirectory)../../interop/*.dll" />
+    </ItemGroup>
+  </Target>
+
+</Project>
