@@ -3,7 +3,6 @@ using SAPAccess.Announcements;
 using SAPAccess.GameState;
 using SAPAccess.NVDA;
 using UnityEngine;
-using UnityEngine.InputSystem;
 
 namespace SAPAccess.Navigation;
 
@@ -18,13 +17,13 @@ public class KeyboardHandler : MonoBehaviour
     private float _lastKeyTime;
     private const float KeyRepeatDelay = 0.15f;
 
-    public new void Awake()
+    public void Awake()
     {
-        _log = Logger.CreateLogSource("SAPAccess.Input");
+        _log = BepInEx.Logging.Logger.CreateLogSource("SAPAccess.Input");
         _focus = FocusManager.Instance;
     }
 
-    public new void Update()
+    public void Update()
     {
         if (_focus == null)
             _focus = FocusManager.Instance;
@@ -33,34 +32,34 @@ public class KeyboardHandler : MonoBehaviour
             return;
 
         // Navigation keys
-        if (WasPressed(Key.LeftArrow))
+        if (WasPressed(KeyCode.LeftArrow))
         {
             _focus?.MoveLeft();
             _lastKeyTime = Time.time;
         }
-        else if (WasPressed(Key.RightArrow))
+        else if (WasPressed(KeyCode.RightArrow))
         {
             _focus?.MoveRight();
             _lastKeyTime = Time.time;
         }
-        else if (WasPressed(Key.UpArrow))
+        else if (WasPressed(KeyCode.UpArrow))
         {
             _focus?.MoveUp();
             _lastKeyTime = Time.time;
         }
-        else if (WasPressed(Key.DownArrow))
+        else if (WasPressed(KeyCode.DownArrow))
         {
             _focus?.MoveDown();
             _lastKeyTime = Time.time;
         }
-        else if (WasPressed(Key.Tab))
+        else if (WasPressed(KeyCode.Tab))
         {
             _focus?.CycleGroup();
             _lastKeyTime = Time.time;
         }
 
         // Activation
-        else if (WasPressed(Key.Enter) || WasPressed(Key.Space))
+        else if (WasPressed(KeyCode.Return) || WasPressed(KeyCode.Space))
         {
             var element = _focus?.CurrentElement;
             if (element?.OnActivate != null)
@@ -71,64 +70,62 @@ public class KeyboardHandler : MonoBehaviour
         }
 
         // Shop action keys
-        else if (WasPressed(Key.R))
+        else if (WasPressed(KeyCode.R))
         {
             ShopAnnouncer.Instance?.Roll();
             _lastKeyTime = Time.time;
         }
-        else if (WasPressed(Key.F))
+        else if (WasPressed(KeyCode.F))
         {
             ShopAnnouncer.Instance?.FreezeToggle();
             _lastKeyTime = Time.time;
         }
-        else if (WasPressed(Key.E))
+        else if (WasPressed(KeyCode.E))
         {
             ShopAnnouncer.Instance?.EndTurn();
             _lastKeyTime = Time.time;
         }
 
         // Info keys
-        else if (WasPressed(Key.T))
+        else if (WasPressed(KeyCode.T))
         {
             TeamAnnouncer.Instance?.AnnounceTeam();
             _lastKeyTime = Time.time;
         }
-        else if (WasPressed(Key.S))
+        else if (WasPressed(KeyCode.S))
         {
             ShopAnnouncer.Instance?.AnnounceShop();
             _lastKeyTime = Time.time;
         }
-        else if (WasPressed(Key.G))
+        else if (WasPressed(KeyCode.G))
         {
             ShopAnnouncer.Instance?.AnnounceStatus();
             _lastKeyTime = Time.time;
         }
-        else if (WasPressed(Key.Escape))
+        else if (WasPressed(KeyCode.Escape))
         {
             ScreenReader.Instance.Stop();
             _lastKeyTime = Time.time;
         }
 
         // Help
-        else if (WasPressed(Key.F1))
+        else if (WasPressed(KeyCode.F1))
         {
             AnnounceKeybindings();
             _lastKeyTime = Time.time;
         }
 
         // Debug
-        else if (WasPressed(Key.F10))
+        else if (WasPressed(KeyCode.F10))
         {
             ScreenReader.Instance.Say("SAPAccess screen reader test.");
             _lastKeyTime = Time.time;
         }
     }
 
-    private static bool WasPressed(Key key)
+    private static bool WasPressed(KeyCode key)
     {
-        var keyboard = Keyboard.current;
-        if (keyboard == null) return false;
-        return keyboard[key].wasPressedThisFrame;
+        return Input.GetKeyDown(key);
     }
 
     private void AnnounceKeybindings()

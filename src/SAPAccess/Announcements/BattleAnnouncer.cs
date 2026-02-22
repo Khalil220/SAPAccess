@@ -17,13 +17,13 @@ public class BattleAnnouncer : MonoBehaviour
     private ManualLogSource? _log;
     private float _lastAnnouncementTime;
 
-    public new void Awake()
+    public void Awake()
     {
         Instance = this;
-        _log = Logger.CreateLogSource("SAPAccess.BattleAnnounce");
+        _log = BepInEx.Logging.Logger.CreateLogSource("SAPAccess.BattleAnnounce");
     }
 
-    public new void Update()
+    public void Update()
     {
         if (GamePhaseTracker.Instance.CurrentPhase != GamePhase.Battle)
             return;
