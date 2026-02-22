@@ -1,6 +1,7 @@
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.IL2CPP;
+using Il2CppInterop.Runtime.Injection;
 using SAPAccess.Announcements;
 using SAPAccess.Config;
 using SAPAccess.GameState;
@@ -40,6 +41,10 @@ public class Plugin : BasePlugin
         var shopAnnouncer = new ShopAnnouncer();
         var teamAnnouncer = new TeamAnnouncer();
         var menuAnnouncer = new MenuAnnouncer();
+
+        // Register custom MonoBehaviour types with Il2Cpp
+        ClassInjector.RegisterTypeInIl2Cpp<KeyboardHandler>();
+        ClassInjector.RegisterTypeInIl2Cpp<BattleAnnouncer>();
 
         // Create persistent GameObject for MonoBehaviours
         _modObject = new GameObject("SAPAccess");
