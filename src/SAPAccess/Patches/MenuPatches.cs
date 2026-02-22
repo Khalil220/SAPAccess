@@ -1,65 +1,137 @@
 using BepInEx.Logging;
+using HarmonyLib;
 using SAPAccess.Announcements;
 using SAPAccess.GameState;
+using SAPAccess.Navigation;
 
 namespace SAPAccess.Patches;
 
 /// <summary>
-/// Harmony hooks for menus (main menu, mode select, settings, results).
-///
-/// NOTE: Exact method signatures will be determined after running Il2CppDumper.
+/// Harmony hooks for menus (page transitions, popups).
 /// </summary>
+[HarmonyPatch]
 public static class MenuPatches
 {
     private static readonly ManualLogSource Log = Logger.CreateLogSource("SAPAccess.MenuPatch");
 
-    /// <summary>Called when the main menu is shown.</summary>
-    public static void OnMainMenuShown()
+    /// <summary>Postfix on PageManager.Open — detects page transitions.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.PageManager), nameof(Spacewood.Unity.PageManager.Open))]
+    [HarmonyPostfix]
+    public static void PageManager_Open_Postfix(Spacewood.Unity.Page page)
     {
-        Log.LogInfo("Main menu shown");
-        GamePhaseTracker.Instance.CurrentPhase = GamePhase.MainMenu;
-        MenuAnnouncer.Instance?.OnMainMenu();
+        try
+        {
+            string pageName = page?.gameObject?.name ?? "Unknown";
+            Log.LogInfo($"Page opened: {pageName}");
+            MenuAnnouncer.Instance?.OnPageChanged(pageName);
+            MenuNavigator.Instance?.OnPageChanged(page);
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"PageManager.Open patch error: {ex}");
+        }
     }
 
-    /// <summary>Called when the mode selection screen is shown.</summary>
-    public static void OnModeSelectShown()
+    /// <summary>Postfix on PopupManager.AddMessage — intercepts popup messages.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.PopupManager), nameof(Spacewood.Unity.PopupManager.AddMessage))]
+    [HarmonyPostfix]
+    public static void PopupManager_AddMessage_Postfix(string message)
     {
-        Log.LogInfo("Mode select shown");
-        GamePhaseTracker.Instance.CurrentPhase = GamePhase.ModeSelect;
-        MenuAnnouncer.Instance?.OnModeSelect();
+        try
+        {
+            Log.LogInfo($"Popup: {message}");
+            MenuAnnouncer.Instance?.OnModal(message, "");
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"PopupManager.AddMessage patch error: {ex}");
+        }
     }
 
-    /// <summary>Called when a modal/popup appears.</summary>
-    public static void OnModalShown(string title, string body)
+    /// <summary>Postfix on Menu.StartLobby — detects return to main lobby.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.Menu), nameof(Spacewood.Unity.Menu.StartLobby))]
+    [HarmonyPostfix]
+    public static void Menu_StartLobby_Postfix()
     {
-        Log.LogInfo($"Modal: {title}");
-        MenuAnnouncer.Instance?.OnModal(title, body);
+        try
+        {
+            Log.LogInfo("Lobby opened");
+            GamePhaseTracker.Instance.CurrentPhase = GamePhase.MainMenu;
+            MenuAnnouncer.Instance?.OnMainMenu();
+            MenuNavigator.Instance?.OnPageChanged(null);
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"Menu.StartLobby patch error: {ex}");
+        }
     }
 
-    /// <summary>Called when a page transition occurs.</summary>
-    public static void OnPageChanged(string pageName)
+    /// <summary>Postfix on Menu.StartModeMenu — detects mode select screen.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.Menu), nameof(Spacewood.Unity.Menu.StartModeMenu))]
+    [HarmonyPostfix]
+    public static void Menu_StartModeMenu_Postfix()
     {
-        Log.LogInfo($"Page changed: {pageName}");
-        MenuAnnouncer.Instance?.OnPageChanged(pageName);
+        try
+        {
+            Log.LogInfo("Mode menu opened");
+            GamePhaseTracker.Instance.CurrentPhase = GamePhase.ModeSelect;
+            MenuAnnouncer.Instance?.OnModeSelect();
+            MenuNavigator.Instance?.OnPageChanged(null);
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"Menu.StartModeMenu patch error: {ex}");
+        }
     }
 
-    /// <summary>Called on game over.</summary>
-    public static void OnGameOver(int wins, int lives)
+    /// <summary>Postfix on Menu.StartSignIn — detects sign-in page.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.Menu), nameof(Spacewood.Unity.Menu.StartSignIn))]
+    [HarmonyPostfix]
+    public static void Menu_StartSignIn_Postfix()
     {
-        Log.LogInfo($"Game over: {wins} wins, {lives} lives");
-        GamePhaseTracker.Instance.CurrentPhase = GamePhase.GameOver;
-        MenuAnnouncer.Instance?.OnGameOver(wins, lives);
+        try
+        {
+            Log.LogInfo("Sign-in page opened");
+            MenuAnnouncer.Instance?.OnPageChanged("Sign In");
+            MenuNavigator.Instance?.OnPageChanged(null);
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"Menu.StartSignIn patch error: {ex}");
+        }
     }
 
-    // =========================================================================
-    // Harmony patch methods will be wired up once interop DLLs are available.
-    // Example:
-    //
-    // [HarmonyPatch(typeof(Il2Cpp.Spacewood.Unity.Menu), "Show")]
-    // [HarmonyPostfix]
-    // public static void Menu_Show_Postfix(Il2Cpp.Spacewood.Unity.Menu __instance)
-    // {
-    //     OnMainMenuShown();
-    // }
-    // =========================================================================
+    /// <summary>Postfix on Menu.StartSignUp — detects sign-up page.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.Menu), nameof(Spacewood.Unity.Menu.StartSignUp))]
+    [HarmonyPostfix]
+    public static void Menu_StartSignUp_Postfix()
+    {
+        try
+        {
+            Log.LogInfo("Sign-up page opened");
+            MenuAnnouncer.Instance?.OnPageChanged("Register");
+            MenuNavigator.Instance?.OnPageChanged(null);
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"Menu.StartSignUp patch error: {ex}");
+        }
+    }
+
+    /// <summary>Postfix on Menu.StartForgotPassword — detects forgot password page.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.Menu), nameof(Spacewood.Unity.Menu.StartForgotPassword))]
+    [HarmonyPostfix]
+    public static void Menu_StartForgotPassword_Postfix()
+    {
+        try
+        {
+            Log.LogInfo("Forgot password page opened");
+            MenuAnnouncer.Instance?.OnPageChanged("Forgot Password");
+            MenuNavigator.Instance?.OnPageChanged(null);
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"Menu.StartForgotPassword patch error: {ex}");
+        }
+    }
 }

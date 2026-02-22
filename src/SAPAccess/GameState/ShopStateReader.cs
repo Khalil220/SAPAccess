@@ -5,7 +5,7 @@ namespace SAPAccess.GameState;
 
 /// <summary>
 /// Reads the current state of the shop: gold, lives, turn number, and shop contents.
-/// Data is populated by Harmony patches on HangarMain and related classes.
+/// Data is populated by Harmony patches on HangarMain and HangarOverlay.
 /// </summary>
 public class ShopStateReader
 {
@@ -16,7 +16,8 @@ public class ShopStateReader
     public int Gold { get; set; }
     public int Lives { get; set; }
     public int Turn { get; set; }
-    public int MaxTeamSize { get; set; } = 5;
+    public int Tier { get; set; }
+    public int Victories { get; set; }
 
     public List<ShopSlot> PetSlots { get; } = new();
     public List<ShopSlot> FoodSlots { get; } = new();
@@ -26,11 +27,74 @@ public class ShopStateReader
         _log = Logger.CreateLogSource("SAPAccess.Shop");
     }
 
-    /// <summary>Clears shop slot data (called on turn start before repopulating).</summary>
-    public void ClearSlots()
+    /// <summary>Reads all shop state from the game's BoardModel.</summary>
+    public void ReadFromBoard(Spacewood.Core.Models.BoardModel board)
     {
+        Gold = board.Gold;
+        Turn = board.Turn;
+        Lives = board.Lives;
+        Tier = board.Tier;
+        Victories = board.Victories;
+
         PetSlots.Clear();
+        if (board.MinionShop != null)
+        {
+            for (int i = 0; i < board.MinionShop.Count; i++)
+            {
+                var minion = board.MinionShop[i];
+                if (minion == null) continue;
+
+                string name;
+                try
+                {
+                    name = Spacewood.Unity.Extensions.MinionModelExtensions.GetNameLocalized(minion) ?? minion.Enum.ToString();
+                }
+                catch
+                {
+                    name = minion.Enum.ToString();
+                }
+
+                PetSlots.Add(new ShopSlot
+                {
+                    Name = name,
+                    Attack = minion.Attack?.Total ?? 0,
+                    Health = minion.Health?.Total ?? 0,
+                    Cost = minion.Price,
+                    IsFrozen = minion.Frozen,
+                    Tier = minion.Tier
+                });
+            }
+        }
+
         FoodSlots.Clear();
+        if (board.SpellShop != null)
+        {
+            for (int i = 0; i < board.SpellShop.Count; i++)
+            {
+                var spell = board.SpellShop[i];
+                if (spell == null) continue;
+
+                string name;
+                try
+                {
+                    name = Spacewood.Unity.Extensions.SpellModelExtensions.GetNameLocalized(spell) ?? spell.Enum.ToString();
+                }
+                catch
+                {
+                    name = spell.Enum.ToString();
+                }
+
+                FoodSlots.Add(new ShopSlot
+                {
+                    Name = name,
+                    Cost = spell.Price,
+                    IsFrozen = spell.Frozen,
+                    IsFood = true
+                });
+            }
+        }
+
+        _log.LogDebug($"Shop read: Turn {Turn}, Gold {Gold}, Lives {Lives}, {PetSlots.Count} pets, {FoodSlots.Count} food");
     }
 
     public string GetStatusSummary()
@@ -48,9 +112,9 @@ public class ShopStateReader
             for (int i = 0; i < PetSlots.Count; i++)
             {
                 var slot = PetSlots[i];
-                parts.Add(slot.IsFrozen
-                    ? $"  {i + 1}. {slot.Name} {slot.Attack}/{slot.Health} frozen"
-                    : $"  {i + 1}. {slot.Name} {slot.Attack}/{slot.Health}");
+                string desc = $"{i + 1}. {slot.Name} {slot.Attack}/{slot.Health}";
+                if (slot.IsFrozen) desc += " frozen";
+                parts.Add(desc);
             }
         }
 
@@ -60,7 +124,9 @@ public class ShopStateReader
             for (int i = 0; i < FoodSlots.Count; i++)
             {
                 var slot = FoodSlots[i];
-                parts.Add($"  {i + 1}. {slot.Name}");
+                string desc = $"{i + 1}. {slot.Name}";
+                if (slot.IsFrozen) desc += " frozen";
+                parts.Add(desc);
             }
         }
 
@@ -79,5 +145,4 @@ public class ShopSlot
     public bool IsFrozen { get; set; }
     public bool IsFood { get; set; }
     public int Tier { get; set; }
-    public Il2CppSystem.Object? GameReference { get; set; }
 }

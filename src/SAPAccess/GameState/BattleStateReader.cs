@@ -5,7 +5,7 @@ namespace SAPAccess.GameState;
 
 /// <summary>
 /// Reads the current state of a battle: events, outcome, and team health.
-/// Data is populated by Harmony patches on BattleController/BattleModel.
+/// Data is populated by Harmony patches on BoardController and BoardView.
 /// </summary>
 public class BattleStateReader
 {

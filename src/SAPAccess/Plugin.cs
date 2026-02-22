@@ -45,6 +45,7 @@ public class Plugin : BasePlugin
         // Register custom MonoBehaviour types with Il2Cpp
         ClassInjector.RegisterTypeInIl2Cpp<KeyboardHandler>();
         ClassInjector.RegisterTypeInIl2Cpp<BattleAnnouncer>();
+        ClassInjector.RegisterTypeInIl2Cpp<MenuNavigator>();
 
         // Create persistent GameObject for MonoBehaviours
         _modObject = new GameObject("SAPAccess");
@@ -54,6 +55,7 @@ public class Plugin : BasePlugin
         // Add MonoBehaviour components
         _modObject.AddComponent<KeyboardHandler>();
         _modObject.AddComponent<BattleAnnouncer>();
+        _modObject.AddComponent<MenuNavigator>();
 
         // Test NVDA connection
         if (NvdaClient.IsAvailable)
@@ -73,9 +75,10 @@ public class Plugin : BasePlugin
             Log.LogWarning("NVDA DLL not found. Speech will be logged only.");
         }
 
-        // Register Harmony patches (will be enabled once interop is available)
-        // var harmony = new HarmonyLib.Harmony(PluginGuid);
-        // harmony.PatchAll(typeof(Patches.HangarPatches).Assembly);
+        // Register Harmony patches
+        var harmony = new HarmonyLib.Harmony(PluginGuid);
+        harmony.PatchAll(typeof(Patches.HangarPatches).Assembly);
+        Log.LogInfo("Harmony patches applied.");
 
         Log.LogInfo($"{PluginName} loaded successfully.");
     }

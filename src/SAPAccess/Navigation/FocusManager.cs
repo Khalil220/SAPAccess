@@ -178,6 +178,8 @@ public class FocusElement
     public string? Type { get; set; }
     public int SlotIndex { get; set; }
     public Action? OnActivate { get; set; }
+    public object? Tag { get; set; }
+    public Func<string?>? DynamicDetail { get; set; }
 
     public FocusElement(string label, int slotIndex = -1)
     {
@@ -187,8 +189,20 @@ public class FocusElement
 
     public string GetDescription()
     {
+        string desc = Label;
         if (!string.IsNullOrEmpty(Detail))
-            return $"{Label}, {Detail}";
-        return Label;
+            desc += $", {Detail}";
+
+        // Append dynamic detail (e.g. current input field value)
+        string? dynDetail = null;
+        try { dynDetail = DynamicDetail?.Invoke(); } catch { }
+        if (!string.IsNullOrEmpty(dynDetail))
+            desc += $", {dynDetail}";
+
+        if (Type == "editbox")
+            desc += ". Edit box. Press Enter to edit.";
+        else if (Type == "button")
+            desc += ". Button.";
+        return desc;
     }
 }

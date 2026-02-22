@@ -1,47 +1,19 @@
 using BepInEx.Logging;
+using HarmonyLib;
 using SAPAccess.NVDA;
 
 namespace SAPAccess.Patches;
 
 /// <summary>
-/// Harmony hooks for generic UI elements (Label, ButtonBase, etc.).
-/// Intercepts text updates to provide screen reader output for UI changes.
-///
-/// NOTE: Exact method signatures will be determined after running Il2CppDumper.
+/// Harmony hooks for UI text changes.
+/// Intercepts TextMeshPro text updates for screen reader output.
 /// </summary>
+[HarmonyPatch]
 public static class UIPatches
 {
     private static readonly ManualLogSource Log = Logger.CreateLogSource("SAPAccess.UIPatch");
 
-    /// <summary>Called when a Label's text is set.</summary>
-    public static void OnLabelTextSet(string text)
-    {
-        // Only log; actual announcements are handled by context-specific announcers.
-        Log.LogDebug($"Label text: {text}");
-    }
-
-    /// <summary>Called when a button becomes focused/highlighted.</summary>
-    public static void OnButtonFocused(string buttonText)
-    {
-        Log.LogDebug($"Button focused: {buttonText}");
-    }
-
-    /// <summary>Called when a tooltip or hover text appears.</summary>
-    public static void OnTooltipShown(string text)
-    {
-        Log.LogDebug($"Tooltip: {text}");
-        ScreenReader.Instance.SayQueued(text);
-    }
-
-    // =========================================================================
-    // Harmony patch methods will be wired up once interop DLLs are available.
-    // Example:
-    //
-    // [HarmonyPatch(typeof(Il2Cpp.Spacewood.Unity.Label), "set_Text")]
-    // [HarmonyPostfix]
-    // public static void Label_SetText_Postfix(string value)
-    // {
-    //     OnLabelTextSet(value);
-    // }
-    // =========================================================================
+    // NOTE: Hooking TMP_Text.set_text is very high-traffic and may cause perf issues.
+    // We hook specific UI components instead (HangarGold.SetGold, HangarLives.Set, etc.)
+    // and only hook PopupManager for popup text. Additional text hooks can be added as needed.
 }

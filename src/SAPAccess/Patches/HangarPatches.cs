@@ -7,98 +7,153 @@ namespace SAPAccess.Patches;
 
 /// <summary>
 /// Harmony hooks for the shop (hangar) phase.
-/// Patches HangarMain, HangarStateMachine, HangarGold, HangarRoll, etc.
-///
-/// NOTE: Exact method signatures will be determined after running Il2CppDumper.
-/// These patches use placeholder class/method names based on known class names
-/// from metadata analysis. They will be updated with correct signatures in Phase 2.
+/// Targets Spacewood.Unity.MonoBehaviours.Build.HangarMain and related UI classes.
 /// </summary>
+[HarmonyPatch]
 public static class HangarPatches
 {
     private static readonly ManualLogSource Log = Logger.CreateLogSource("SAPAccess.HangarPatch");
 
-    /// <summary>
-    /// Called when the shop phase begins (HangarMain initializes or a new turn starts).
-    /// Triggers shop state reading and announcements.
-    /// </summary>
-    public static void OnShopPhaseEnter()
+    /// <summary>Postfix on HangarMain.StartTurnAsync — detects new turn start.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.MonoBehaviours.Build.HangarMain), nameof(Spacewood.Unity.MonoBehaviours.Build.HangarMain.StartTurnAsync))]
+    [HarmonyPostfix]
+    public static void HangarMain_StartTurnAsync_Postfix(Spacewood.Unity.MonoBehaviours.Build.HangarMain __instance)
     {
-        Log.LogInfo("Shop phase entered");
-        GamePhaseTracker.Instance.CurrentPhase = GamePhase.Shop;
-        ShopAnnouncer.Instance?.OnTurnStart();
+        try
+        {
+            GamePhaseTracker.Instance.CurrentPhase = GamePhase.Shop;
+
+            var board = __instance.BuildModel?.Board;
+            if (board != null)
+            {
+                ShopStateReader.Instance.ReadFromBoard(board);
+                TeamStateReader.Instance.ReadFromBoard(board);
+            }
+
+            ShopAnnouncer.Instance?.OnTurnStart();
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"StartTurnAsync patch error: {ex}");
+        }
     }
 
-    /// <summary>
-    /// Called when gold changes (buy, roll, sell, etc.).
-    /// Updates the ShopStateReader.
-    /// </summary>
-    public static void OnGoldChanged(int newGold)
+    /// <summary>Postfix on HangarMain.EndTurnAsync — detects turn end / battle start.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.MonoBehaviours.Build.HangarMain), nameof(Spacewood.Unity.MonoBehaviours.Build.HangarMain.EndTurnAsync))]
+    [HarmonyPostfix]
+    public static void HangarMain_EndTurnAsync_Postfix()
     {
-        ShopStateReader.Instance.Gold = newGold;
-        Log.LogDebug($"Gold changed to {newGold}");
+        try
+        {
+            Log.LogInfo("Turn ended, battle starting");
+            GamePhaseTracker.Instance.CurrentPhase = GamePhase.Battle;
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"EndTurnAsync patch error: {ex}");
+        }
     }
 
-    /// <summary>
-    /// Called when the player rolls the shop.
-    /// Triggers shop content re-read and announcement.
-    /// </summary>
-    public static void OnRoll()
+    /// <summary>Postfix on HangarMain.RollShopAsync — detects shop roll.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.MonoBehaviours.Build.HangarMain), nameof(Spacewood.Unity.MonoBehaviours.Build.HangarMain.RollShopAsync))]
+    [HarmonyPostfix]
+    public static void HangarMain_RollShopAsync_Postfix(Spacewood.Unity.MonoBehaviours.Build.HangarMain __instance)
     {
-        Log.LogInfo("Shop rolled");
-        ShopAnnouncer.Instance?.OnShopRolled();
+        try
+        {
+            var board = __instance.BuildModel?.Board;
+            if (board != null)
+            {
+                ShopStateReader.Instance.ReadFromBoard(board);
+            }
+            ShopAnnouncer.Instance?.OnShopRolled();
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"RollShopAsync patch error: {ex}");
+        }
     }
 
-    /// <summary>
-    /// Called when a pet or food is frozen/unfrozen.
-    /// </summary>
-    public static void OnFreezeToggle(int slotIndex, bool frozen)
+    /// <summary>Postfix on HangarMain.SellMinionAsync — detects pet sell.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.MonoBehaviours.Build.HangarMain), "SellMinionAsync", new[] { typeof(Spacewood.Core.Models.Item.ItemId) })]
+    [HarmonyPostfix]
+    public static void HangarMain_SellMinionAsync_Postfix(Spacewood.Unity.MonoBehaviours.Build.HangarMain __instance)
     {
-        Log.LogInfo($"Slot {slotIndex} freeze: {frozen}");
+        try
+        {
+            var board = __instance.BuildModel?.Board;
+            if (board != null)
+            {
+                ShopStateReader.Instance.ReadFromBoard(board);
+                TeamStateReader.Instance.ReadFromBoard(board);
+            }
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"SellMinionAsync patch error: {ex}");
+        }
     }
 
-    /// <summary>
-    /// Called when the player ends their turn (starts battle).
-    /// </summary>
-    public static void OnEndTurn()
+    /// <summary>Postfix on HangarMain.FreezeItem — detects freeze toggle.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.MonoBehaviours.Build.HangarMain), nameof(Spacewood.Unity.MonoBehaviours.Build.HangarMain.FreezeItem))]
+    [HarmonyPostfix]
+    public static void HangarMain_FreezeItem_Postfix()
     {
-        Log.LogInfo("Turn ended, battle starting");
-        GamePhaseTracker.Instance.CurrentPhase = GamePhase.Battle;
+        try
+        {
+            Log.LogInfo("Item freeze toggled");
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"FreezeItem patch error: {ex}");
+        }
     }
 
-    /// <summary>
-    /// Called when a pet is bought from the shop.
-    /// </summary>
-    public static void OnBuy(string petName, int cost)
+    /// <summary>Postfix on HangarGold.SetGold — tracks gold display changes.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.MonoBehaviours.Build.HangarGold), nameof(Spacewood.Unity.MonoBehaviours.Build.HangarGold.SetGold))]
+    [HarmonyPostfix]
+    public static void HangarGold_SetGold_Postfix(int gold)
     {
-        Log.LogInfo($"Bought {petName} for {cost} gold");
-        ShopAnnouncer.Instance?.OnBuy(petName, cost);
+        try
+        {
+            ShopStateReader.Instance.Gold = gold;
+            Log.LogDebug($"Gold: {gold}");
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"SetGold patch error: {ex}");
+        }
     }
 
-    /// <summary>
-    /// Called when a pet is sold from the team.
-    /// </summary>
-    public static void OnSell(string petName, int goldGained)
+    /// <summary>Postfix on HangarLives.Set — tracks lives display changes.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.MonoBehaviours.Build.HangarLives), nameof(Spacewood.Unity.MonoBehaviours.Build.HangarLives.Set))]
+    [HarmonyPostfix]
+    public static void HangarLives_Set_Postfix(int current, int max)
     {
-        Log.LogInfo($"Sold {petName} for {goldGained} gold");
-        ShopAnnouncer.Instance?.OnSell(petName, goldGained);
+        try
+        {
+            ShopStateReader.Instance.Lives = current;
+            Log.LogDebug($"Lives: {current}/{max}");
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"HangarLives.Set patch error: {ex}");
+        }
     }
 
-    // =========================================================================
-    // Harmony patch methods below will be wired up once interop DLLs are available.
-    // Example of what they will look like:
-    //
-    // [HarmonyPatch(typeof(Il2Cpp.Spacewood.Unity.HangarMain), "Open")]
-    // [HarmonyPostfix]
-    // public static void HangarMain_Open_Postfix()
-    // {
-    //     OnShopPhaseEnter();
-    // }
-    //
-    // [HarmonyPatch(typeof(Il2Cpp.Spacewood.Unity.HangarGold), "SetGold")]
-    // [HarmonyPostfix]
-    // public static void HangarGold_SetGold_Postfix(int gold)
-    // {
-    //     OnGoldChanged(gold);
-    // }
-    // =========================================================================
+    /// <summary>Postfix on HangarTurns.Set — tracks turn display changes.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.MonoBehaviours.Build.HangarTurns), nameof(Spacewood.Unity.MonoBehaviours.Build.HangarTurns.Set))]
+    [HarmonyPostfix]
+    public static void HangarTurns_Set_Postfix(int turn)
+    {
+        try
+        {
+            ShopStateReader.Instance.Turn = turn;
+            Log.LogDebug($"Turn: {turn}");
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"HangarTurns.Set patch error: {ex}");
+        }
+    }
 }

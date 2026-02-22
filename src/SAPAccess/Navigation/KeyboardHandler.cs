@@ -28,6 +28,16 @@ public class KeyboardHandler : MonoBehaviour
         if (_focus == null)
             _focus = FocusManager.Instance;
 
+        // While editing an input field, only F10 and F1 work; all other input goes to the field
+        if (MenuNavigator.Instance?.IsEditing == true)
+        {
+            if (WasPressed(KeyCode.F10))
+            {
+                ScreenReader.Instance.Say("SAPAccess screen reader test.");
+            }
+            return;
+        }
+
         if (Time.time - _lastKeyTime < KeyRepeatDelay)
             return;
 
@@ -69,42 +79,52 @@ public class KeyboardHandler : MonoBehaviour
             }
         }
 
-        // Shop action keys
-        else if (WasPressed(KeyCode.R))
+        // Shop action keys (only in shop phase)
+        else if (GamePhaseTracker.Instance.CurrentPhase == GamePhase.Shop && WasPressed(KeyCode.R))
         {
             ShopAnnouncer.Instance?.Roll();
             _lastKeyTime = Time.time;
         }
-        else if (WasPressed(KeyCode.F))
+        else if (GamePhaseTracker.Instance.CurrentPhase == GamePhase.Shop && WasPressed(KeyCode.F))
         {
             ShopAnnouncer.Instance?.FreezeToggle();
             _lastKeyTime = Time.time;
         }
-        else if (WasPressed(KeyCode.E))
+        else if (GamePhaseTracker.Instance.CurrentPhase == GamePhase.Shop && WasPressed(KeyCode.E))
         {
             ShopAnnouncer.Instance?.EndTurn();
             _lastKeyTime = Time.time;
         }
 
-        // Info keys
-        else if (WasPressed(KeyCode.T))
+        // Info keys (only in shop phase)
+        else if (GamePhaseTracker.Instance.CurrentPhase == GamePhase.Shop && WasPressed(KeyCode.T))
         {
             TeamAnnouncer.Instance?.AnnounceTeam();
             _lastKeyTime = Time.time;
         }
-        else if (WasPressed(KeyCode.S))
+        else if (GamePhaseTracker.Instance.CurrentPhase == GamePhase.Shop && WasPressed(KeyCode.S))
         {
             ShopAnnouncer.Instance?.AnnounceShop();
             _lastKeyTime = Time.time;
         }
-        else if (WasPressed(KeyCode.G))
+        else if (GamePhaseTracker.Instance.CurrentPhase == GamePhase.Shop && WasPressed(KeyCode.G))
         {
             ShopAnnouncer.Instance?.AnnounceStatus();
             _lastKeyTime = Time.time;
         }
+
+        // Escape: in menus go back, otherwise stop speech
         else if (WasPressed(KeyCode.Escape))
         {
-            ScreenReader.Instance.Stop();
+            var phase = GamePhaseTracker.Instance.CurrentPhase;
+            if (phase == GamePhase.MainMenu || phase == GamePhase.ModeSelect)
+            {
+                MenuNavigator.Instance?.GoBack();
+            }
+            else
+            {
+                ScreenReader.Instance.Stop();
+            }
             _lastKeyTime = Time.time;
         }
 

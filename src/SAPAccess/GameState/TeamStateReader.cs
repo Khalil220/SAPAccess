@@ -4,8 +4,7 @@ using BepInEx.Logging;
 namespace SAPAccess.GameState;
 
 /// <summary>
-/// Reads the current team composition (up to 5 pet slots).
-/// Data is populated by Harmony patches on BoardModel/BoardView.
+/// Reads the current team composition from the game's BoardModel.
 /// </summary>
 public class TeamStateReader
 {
@@ -20,10 +19,52 @@ public class TeamStateReader
         _log = Logger.CreateLogSource("SAPAccess.Team");
     }
 
-    /// <summary>Clears team data (called before repopulating).</summary>
-    public void Clear()
+    /// <summary>Reads team composition from the game's BoardModel.</summary>
+    public void ReadFromBoard(Spacewood.Core.Models.BoardModel board)
     {
         Slots.Clear();
+
+        if (board.Minions?.Items == null) return;
+
+        for (int i = 0; i < board.Minions.Items.Count; i++)
+        {
+            var minion = board.Minions.Items[i];
+            if (minion == null || minion.Dead) continue;
+
+            string name;
+            try
+            {
+                name = Spacewood.Unity.Extensions.MinionModelExtensions.GetNameLocalized(minion) ?? minion.Enum.ToString();
+            }
+            catch
+            {
+                name = minion.Enum.ToString();
+            }
+
+            string? heldItem = null;
+            if (minion.Perk.HasValue)
+            {
+                try
+                {
+                    var perkEnum = minion.Perk.Value;
+                    heldItem = perkEnum.ToString();
+                }
+                catch { }
+            }
+
+            Slots.Add(new TeamSlot
+            {
+                Name = name,
+                Attack = minion.Attack?.Total ?? 0,
+                Health = minion.Health?.Total ?? 0,
+                Level = minion.Level,
+                Experience = minion.Exp,
+                HeldItem = heldItem,
+                Position = i
+            });
+        }
+
+        _log.LogDebug($"Team read: {Slots.Count} pets");
     }
 
     public string GetTeamSummary()
@@ -56,5 +97,4 @@ public class TeamSlot
     public int Experience { get; set; }
     public string? HeldItem { get; set; }
     public int Position { get; set; }
-    public Il2CppSystem.Object? GameReference { get; set; }
 }
