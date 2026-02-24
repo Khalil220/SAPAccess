@@ -1278,10 +1278,11 @@ public class MenuNavigator : MonoBehaviour
             group.Elements.Add(elements[i].element);
         }
 
-        FocusManager.Instance?.SetGroups(new List<FocusGroup> { group });
-
+        // Announce dialog text BEFORE setting focus groups (which announces the first button)
         if (!string.IsNullOrWhiteSpace(text))
             ScreenReader.Instance.Say(text);
+
+        FocusManager.Instance?.SetGroups(new List<FocusGroup> { group });
 
         _log?.LogInfo($"Alert dialog detected: {text}");
     }
@@ -1473,15 +1474,15 @@ public class MenuNavigator : MonoBehaviour
             group.Elements.Add(elements[i].element);
         }
 
-        var groups = new List<FocusGroup> { group };
-        FocusManager.Instance?.SetGroups(groups);
-
-        // Announce dialog title
+        // Announce dialog title BEFORE setting focus groups (which announces the first button)
         string announcement = title;
         if (!string.IsNullOrWhiteSpace(note))
             announcement += ". " + note;
         if (!string.IsNullOrWhiteSpace(announcement))
             ScreenReader.Instance.Say(announcement);
+
+        var groups = new List<FocusGroup> { group };
+        FocusManager.Instance?.SetGroups(groups);
 
         _log?.LogInfo($"Picker scan: {group.Elements.Count} options. Title: {title}");
     }
@@ -2141,10 +2142,7 @@ public class MenuNavigator : MonoBehaviour
         }
         catch { }
 
-        if (groups.Count > 0)
-            FocusManager.Instance?.SetGroups(groups);
-
-        // Announce the screen
+        // Announce the screen BEFORE setting focus groups (which announces the first element)
         string nameText = "";
         try { nameText = dock.NameTextMesh?.text ?? ""; } catch { }
         string announcement = "Name your team. Use Left and Right to browse adjectives and nouns. Tab to switch. Enter to select.";
@@ -2152,6 +2150,10 @@ public class MenuNavigator : MonoBehaviour
             announcement += $" Current name: {nameText}.";
 
         ScreenReader.Instance.Say(announcement);
+
+        if (groups.Count > 0)
+            FocusManager.Instance?.SetGroups(groups);
+
         _log?.LogInfo($"Dock scan: {adjGroup.Elements.Count} adjectives, {nounGroup.Elements.Count} nouns");
     }
 
@@ -3149,10 +3151,19 @@ public class MenuNavigator : MonoBehaviour
             if (item == null) continue;
             try { if (!item.gameObject.activeInHierarchy) continue; } catch { continue; }
 
-            // Skip items with no interactable button — these are achievement/perk placeholders
+            // Skip items with no interactable button
             bool hasButton = false;
             try { hasButton = item.Button != null && item.Button.GetInteractable(); } catch { }
             if (!hasButton) continue;
+
+            // Skip prefab template items — real items are instantiated as "(Clone)",
+            // while the 3 prefab originals have names like "DeckViewerItem", "DeckViewerItem (1)", etc.
+            try
+            {
+                string? goName = item.gameObject?.name;
+                if (goName != null && !goName.Contains("(Clone)")) continue;
+            }
+            catch { continue; }
 
             string? itemName = ResolveViewerItemName(item, category);
             group.Elements.Add(new FocusElement($"{tierLabel}: {itemName}", idx++)
