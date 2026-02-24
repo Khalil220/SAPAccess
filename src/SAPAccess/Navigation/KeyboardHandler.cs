@@ -62,15 +62,16 @@ public class KeyboardHandler : MonoBehaviour
         }
         else if (WasPressed(KeyCode.UpArrow))
         {
-            if (inShop)
-                _focus?.InfoUp(); // Scroll up through item info rows
+            // Use InfoUp when current element has info rows (shop items, pack preview, etc.)
+            if (inShop || _focus?.CurrentElement?.InfoRows is { Count: > 0 })
+                _focus?.InfoUp();
             else
                 _focus?.MoveUp(); // Switch groups in menus
         }
         else if (WasPressed(KeyCode.DownArrow))
         {
-            if (inShop)
-                _focus?.InfoDown(); // Scroll down through item info rows
+            if (inShop || _focus?.CurrentElement?.InfoRows is { Count: > 0 })
+                _focus?.InfoDown();
             else
                 _focus?.MoveDown(); // Switch groups in menus
         }
@@ -153,10 +154,14 @@ public class KeyboardHandler : MonoBehaviour
             ShopAnnouncer.Instance?.AnnounceStatus();
         }
 
-        // Escape: cancel food targeting, go back in menus, or stop speech
+        // Escape: close dialog, cancel food targeting, go back in menus, or stop speech
         else if (WasPressed(KeyCode.Escape))
         {
-            if (inShop && MenuNavigator.Instance?.HasPendingFood == true)
+            if (MenuNavigator.Instance?.IsDialogOpen == true)
+            {
+                MenuNavigator.Instance.DismissCurrentDialog();
+            }
+            else if (inShop && MenuNavigator.Instance?.HasPendingFood == true)
             {
                 MenuNavigator.Instance.CancelPendingFood();
             }
@@ -168,6 +173,17 @@ public class KeyboardHandler : MonoBehaviour
             {
                 ScreenReader.Instance.Stop();
             }
+        }
+
+        // Home: jump to first item in current group
+        else if (WasPressed(KeyCode.Home))
+        {
+            _focus?.MoveToFirst();
+        }
+        // End: jump to last item in current group
+        else if (WasPressed(KeyCode.End))
+        {
+            _focus?.MoveToLast();
         }
 
         // Help

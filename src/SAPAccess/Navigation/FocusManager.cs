@@ -129,6 +129,33 @@ public class FocusManager
         AnnounceFocus();
     }
 
+    /// <summary>Jump to the first element in the current group.</summary>
+    public void MoveToFirst()
+    {
+        if (_groups.Count == 0) return;
+        var group = _groups[_currentGroupIndex];
+        if (group.Elements.Count == 0) return;
+        if (_currentElementIndex == 0) { AnnounceFocus(); return; }
+
+        _currentElementIndex = 0;
+        _currentInfoRow = 0;
+        AnnounceFocus();
+    }
+
+    /// <summary>Jump to the last element in the current group.</summary>
+    public void MoveToLast()
+    {
+        if (_groups.Count == 0) return;
+        var group = _groups[_currentGroupIndex];
+        if (group.Elements.Count == 0) return;
+        int last = group.Elements.Count - 1;
+        if (_currentElementIndex == last) { AnnounceFocus(); return; }
+
+        _currentElementIndex = last;
+        _currentInfoRow = 0;
+        AnnounceFocus();
+    }
+
     /// <summary>Move focus right (next element in current group). Resets info row to 0.</summary>
     public void MoveRight()
     {

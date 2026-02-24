@@ -1157,7 +1157,12 @@ public class MenuNavigator : MonoBehaviour
     {
         if (string.IsNullOrEmpty(text)) return text;
         // Remove all XML-style tags: <tag>, </tag>, <tag=value>, <tag="value">
-        return System.Text.RegularExpressions.Regex.Replace(text, "<[^>]+>", "").Trim();
+        text = System.Text.RegularExpressions.Regex.Replace(text, "<[^>]+>", "");
+        // Remove icon placeholders: {AttackIcon}, {HealthIcon}, etc.
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\{[^}]+\}", "");
+        // Collapse multiple spaces left behind by removed tokens
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"  +", " ");
+        return text.Trim();
     }
 
     private static string GetMinionName(Spacewood.Core.Models.MinionModel minion)
@@ -3200,12 +3205,186 @@ public class MenuNavigator : MonoBehaviour
             catch { continue; }
 
             string? itemName = ResolveViewerItemName(item, category);
-            group.Elements.Add(new FocusElement($"{tierLabel}: {itemName}", idx++)
+            string name = itemName ?? category;
+
+            // Build info rows inline (avoid instance method with List<string> return type —
+            // IL2CPP interop doesn't support complex return types on MonoBehaviour methods)
+            var rows = new List<string>();
+            rows.Add($"{tierLabel}: {name}"); // Row 0: tier + name
+
+            if (category == "Pet")
+            {
+                var template = TryGetMinionTemplate(item, name);
+                if (template != null)
+                {
+                    try { rows.Add($"{template.Attack} attack, {template.Health} health"); } catch { }
+                    try
+                    {
+                        var abilities = template.Abilities;
+                        if (abilities != null && abilities.Count > 0)
+                        {
+                            var abilityTemplate = abilities[0].Template;
+                            if (abilityTemplate != null)
+                            {
+                                string? about = abilityTemplate.About;
+                                if (!string.IsNullOrWhiteSpace(about))
+                                    rows.Add(StripRichText(about!));
+                            }
+                        }
+                    }
+                    catch { }
+                    _log?.LogInfo($"DeckViewer pet '{name}': {rows.Count} info rows");
+                }
+                else
+                {
+                    _log?.LogInfo($"DeckViewer pet '{name}': template not found");
+                }
+            }
+            else // Food/Spell
+            {
+                var spell = TryGetSpellTemplate(item, name);
+                if (spell != null)
+                {
+                    string? abilityText = null;
+                    try
+                    {
+                        var model = spell.Model;
+                        if (model != null)
+                            abilityText = Spacewood.Unity.Extensions.SpellModelExtensions.GetAbilityLocalized(model);
+                    }
+                    catch { }
+                    if (string.IsNullOrWhiteSpace(abilityText))
+                    {
+                        try { abilityText = spell.About; } catch { }
+                    }
+                    if (!string.IsNullOrWhiteSpace(abilityText))
+                        rows.Add(StripRichText(abilityText!));
+
+                    try
+                    {
+                        string? finePrint = spell.FinePrint;
+                        if (!string.IsNullOrWhiteSpace(finePrint))
+                            rows.Add(StripRichText(finePrint!));
+                    }
+                    catch { }
+
+                    // If the spell grants a perk, describe the perk effect.
+                    // We can't use spell.Perk directly (IL2CPP Nullable<enum> marshalling is broken,
+                    // always returns value 0). Instead, try matching the SpellEnum name to a Perk enum name
+                    // — they match for perk-granting foods (Honey→Honey, Garlic→Garlic, etc.).
+                    try
+                    {
+                        string spellEnumName = spell.Enum.ToString();
+                        if (System.Enum.TryParse<Spacewood.Core.Enums.Perk>(spellEnumName, out var perkEnum))
+                        {
+                            var perkTemplate = Spacewood.Core.Enums.PerkConstants.GetPerk(perkEnum);
+                            if (perkTemplate != null)
+                            {
+                                string? perkName = perkTemplate.Name;
+                                string? perkAbout = perkTemplate.GetAbout();
+                                if (!string.IsNullOrWhiteSpace(perkName) && !string.IsNullOrWhiteSpace(perkAbout))
+                                    rows.Add($"Perk: {StripRichText(perkName!)}. {StripRichText(perkAbout!)}");
+                                else if (!string.IsNullOrWhiteSpace(perkName))
+                                    rows.Add($"Perk: {StripRichText(perkName!)}");
+                            }
+                        }
+                    }
+                    catch { }
+                    _log?.LogInfo($"DeckViewer food '{name}': {rows.Count} info rows");
+                }
+                else
+                {
+                    _log?.LogInfo($"DeckViewer food '{name}': template not found");
+                }
+            }
+
+            group.Elements.Add(new FocusElement(name, idx++)
             {
                 Type = "text",
-                Tag = item
+                Tag = item,
+                InfoRows = rows
             });
         }
+    }
+
+    /// <summary>Attempts to resolve a DeckViewerItem to a MinionTemplate by parsing
+    /// the sprite name as a MinionEnum and looking up via MinionConstants.</summary>
+    private static Spacewood.Core.Enums.MinionTemplate? TryGetMinionTemplate(
+        Spacewood.Unity.MonoBehaviours.Build.DeckViewerItem item, string resolvedName)
+    {
+        // Try parsing sprite name as MinionEnum (sprite names like "Duck_2x" → "Duck" = MinionEnum.Duck)
+        try
+        {
+            string? spriteName = item.Icon?.sprite?.name;
+            if (!string.IsNullOrWhiteSpace(spriteName))
+            {
+                string clean = spriteName!;
+                if (clean.EndsWith("_2x") || clean.EndsWith("_1x"))
+                    clean = clean.Substring(0, clean.Length - 3);
+                if (clean.StartsWith("pet-")) clean = clean.Substring(4);
+
+                if (System.Enum.TryParse<Spacewood.Core.Enums.MinionEnum>(clean, true, out var minionEnum))
+                {
+                    var template = Spacewood.Core.Enums.MinionConstants.TryGetMinion(minionEnum);
+                    if (template != null) return template;
+                }
+            }
+        }
+        catch { }
+
+        // Fallback: try resolved name as enum
+        try
+        {
+            if (System.Enum.TryParse<Spacewood.Core.Enums.MinionEnum>(resolvedName, true, out var minionEnum))
+            {
+                var template = Spacewood.Core.Enums.MinionConstants.TryGetMinion(minionEnum);
+                if (template != null) return template;
+            }
+        }
+        catch { }
+
+        return null;
+    }
+
+    /// <summary>Attempts to resolve a DeckViewerItem to a Spell template by parsing
+    /// the sprite name as a SpellEnum and looking up via SpellConstants.</summary>
+    private static Spacewood.Core.Models.Spells.Spell? TryGetSpellTemplate(
+        Spacewood.Unity.MonoBehaviours.Build.DeckViewerItem item, string resolvedName)
+    {
+        // Try parsing sprite name as SpellEnum
+        try
+        {
+            string? spriteName = item.Icon?.sprite?.name;
+            if (!string.IsNullOrWhiteSpace(spriteName))
+            {
+                string clean = spriteName!;
+                if (clean.EndsWith("_2x") || clean.EndsWith("_1x"))
+                    clean = clean.Substring(0, clean.Length - 3);
+                if (clean.StartsWith("spell-")) clean = clean.Substring(6);
+                if (clean.StartsWith("food-")) clean = clean.Substring(5);
+                if (clean.StartsWith("perk-")) clean = clean.Substring(5);
+
+                if (System.Enum.TryParse<Spacewood.Core.Enums.SpellEnum>(clean, true, out var spellEnum))
+                {
+                    var template = Spacewood.Core.Enums.SpellConstants.GetSpell(spellEnum);
+                    if (template != null) return template;
+                }
+            }
+        }
+        catch { }
+
+        // Fallback: try resolved name as enum
+        try
+        {
+            if (System.Enum.TryParse<Spacewood.Core.Enums.SpellEnum>(resolvedName, true, out var spellEnum))
+            {
+                var template = Spacewood.Core.Enums.SpellConstants.GetSpell(spellEnum);
+                if (template != null) return template;
+            }
+        }
+        catch { }
+
+        return null;
     }
 
     private string ResolveViewerItemName(Spacewood.Unity.MonoBehaviours.Build.DeckViewerItem item, string fallback)
@@ -3277,6 +3456,64 @@ public class MenuNavigator : MonoBehaviour
         return fallback;
     }
 
+
+    /// <summary>Closes the currently open dialog (DeckViewer, Alert, Picker).</summary>
+    public void DismissCurrentDialog()
+    {
+        // DeckViewer (pack preview)
+        try
+        {
+            if (_cachedDeckViewer != null && _deckViewerWasActive)
+            {
+                var closeBtn = _cachedDeckViewer.CloseButton;
+                if (closeBtn != null)
+                {
+                    closeBtn.Click();
+                    _log?.LogInfo("DeckViewer dismissed via Escape");
+                    return;
+                }
+            }
+        }
+        catch { }
+
+        // Alert2 dialog — click Cancel button
+        try
+        {
+            if (_cachedAlert != null && _alertWasOpen)
+            {
+                var cancelBtn = _cachedAlert.CancelButton;
+                if (cancelBtn != null)
+                {
+                    cancelBtn.Click();
+                    _log?.LogInfo("Alert dismissed via Escape");
+                    return;
+                }
+            }
+        }
+        catch { }
+
+        // Picker dialog — click backdrop button to dismiss
+        try
+        {
+            if (_cachedPicker != null && _pickerWasActive)
+            {
+                var backdrop = _cachedPicker.BackdropButton;
+                if (backdrop != null)
+                {
+                    backdrop.onClick?.Invoke();
+                    _log?.LogInfo("Picker dismissed via Escape");
+                    return;
+                }
+            }
+        }
+        catch { }
+
+        // Fallback: just clear the dialog state
+        IsDialogOpen = false;
+        _preserveFocusOnRescan = true;
+        RequestRescan();
+        _log?.LogInfo("Dialog dismissed (fallback)");
+    }
 
     public void GoBack()
     {
