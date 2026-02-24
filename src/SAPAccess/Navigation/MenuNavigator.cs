@@ -95,6 +95,9 @@ public class MenuNavigator : MonoBehaviour
     private Spacewood.Unity.MonoBehaviours.Build.DeckViewer? _cachedDeckViewer;
     private bool _deckViewerWasActive;
 
+    // When true, the next rescan will preserve focus position instead of resetting to first group
+    private bool _preserveFocusOnRescan;
+
     public void Awake()
     {
         Instance = this;
@@ -1302,7 +1305,10 @@ public class MenuNavigator : MonoBehaviour
                 FocusManager.Instance?.Clear();
         }
         else
+        {
+            _preserveFocusOnRescan = true;
             RequestRescan();
+        }
 
         _log?.LogInfo("Alert dialog closed");
     }
@@ -1379,7 +1385,10 @@ public class MenuNavigator : MonoBehaviour
                 FocusManager.Instance?.Clear();
         }
         else
+        {
+            _preserveFocusOnRescan = true;
             RequestRescan();
+        }
 
         _log?.LogInfo("Picker dialog closed");
     }
@@ -2659,7 +2668,15 @@ public class MenuNavigator : MonoBehaviour
         }
 
         var groups = new List<FocusGroup> { group };
-        FocusManager.Instance?.SetGroups(groups);
+        if (_preserveFocusOnRescan)
+        {
+            _preserveFocusOnRescan = false;
+            FocusManager.Instance?.ReplaceGroupsSilent(groups);
+        }
+        else
+        {
+            FocusManager.Instance?.SetGroups(groups);
+        }
 
         _log?.LogInfo($"Menu scan: {group.Elements.Count} elements on {page.gameObject?.name}");
     }
@@ -2806,29 +2823,37 @@ public class MenuNavigator : MonoBehaviour
             return; // Will not reach here normally; fallback handled by caller
         }
 
-        FocusManager.Instance?.SetGroups(groups);
-
-        // Announce the equipped pack
-        string? equippedName = null;
-        try
+        if (_preserveFocusOnRescan)
         {
-            var eq = packShop.EquippedProduct;
-            if (eq != null)
+            _preserveFocusOnRescan = false;
+            FocusManager.Instance?.ReplaceGroupsSilent(groups);
+        }
+        else
+        {
+            FocusManager.Instance?.SetGroups(groups);
+
+            // Announce the equipped pack only on fresh scans (not after dialog close)
+            string? equippedName = null;
+            try
             {
-                try { equippedName = eq.ProductTemplate?.Name; } catch { }
-                if (!IsUsefulLabel(equippedName))
+                var eq = packShop.EquippedProduct;
+                if (eq != null)
                 {
-                    try { equippedName = eq.Name?.text; } catch { }
+                    try { equippedName = eq.ProductTemplate?.Name; } catch { }
+                    if (!IsUsefulLabel(equippedName))
+                    {
+                        try { equippedName = eq.Name?.text; } catch { }
+                    }
                 }
             }
+            catch { }
+
+            string announcement = "Pack selection.";
+            if (IsUsefulLabel(equippedName))
+                announcement += $" Current pack: {equippedName}.";
+
+            ScreenReader.Instance.Say(announcement);
         }
-        catch { }
-
-        string announcement = "Pack selection.";
-        if (IsUsefulLabel(equippedName))
-            announcement += $" Current pack: {equippedName}.";
-
-        ScreenReader.Instance.Say(announcement);
 
         _log?.LogInfo($"PackShop arena scan: {packsGroup.Elements.Count} packs, {optionsGroup.Elements.Count} options");
     }
@@ -2996,8 +3021,17 @@ public class MenuNavigator : MonoBehaviour
             return;
         }
 
-        FocusManager.Instance?.SetGroups(new List<FocusGroup> { group });
-        ScreenReader.Instance.Say("Pets.");
+        var groups = new List<FocusGroup> { group };
+        if (_preserveFocusOnRescan)
+        {
+            _preserveFocusOnRescan = false;
+            FocusManager.Instance?.ReplaceGroupsSilent(groups);
+        }
+        else
+        {
+            FocusManager.Instance?.SetGroups(groups);
+            ScreenReader.Instance.Say("Pets.");
+        }
         _log?.LogInfo($"PackShop store scan: {group.Elements.Count} packs");
     }
 
