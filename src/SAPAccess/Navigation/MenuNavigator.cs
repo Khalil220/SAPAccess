@@ -95,8 +95,9 @@ public class MenuNavigator : MonoBehaviour
     private Spacewood.Unity.MonoBehaviours.Build.DeckViewer? _cachedDeckViewer;
     private bool _deckViewerWasActive;
 
-    // When true, the next rescan will preserve focus position instead of resetting to first group
-    private bool _preserveFocusOnRescan;
+    // When set, the next rescan will restore focus to this group and element instead of resetting
+    private string? _restoreGroupName;
+    private int _restoreElementIndex;
 
     public void Awake()
     {
@@ -1217,6 +1218,8 @@ public class MenuNavigator : MonoBehaviour
 
     private void OnAlertOpened()
     {
+        _restoreGroupName = FocusManager.Instance?.CurrentGroup?.Name;
+        _restoreElementIndex = FocusManager.Instance?.CurrentElementIndex ?? 0;
         IsDialogOpen = true;
 
         string text = "";
@@ -1311,7 +1314,6 @@ public class MenuNavigator : MonoBehaviour
         }
         else
         {
-            _preserveFocusOnRescan = true;
             RequestRescan();
         }
 
@@ -1364,6 +1366,8 @@ public class MenuNavigator : MonoBehaviour
     public void OnPickerOpened()
     {
         if (IsDialogOpen) return;
+        _restoreGroupName = FocusManager.Instance?.CurrentGroup?.Name;
+        _restoreElementIndex = FocusManager.Instance?.CurrentElementIndex ?? 0;
         IsDialogOpen = true;
         _needsPickerScan = true;
         _pickerScanDelay = 0.15f;
@@ -1391,7 +1395,6 @@ public class MenuNavigator : MonoBehaviour
         }
         else
         {
-            _preserveFocusOnRescan = true;
             RequestRescan();
         }
 
@@ -2673,15 +2676,8 @@ public class MenuNavigator : MonoBehaviour
         }
 
         var groups = new List<FocusGroup> { group };
-        if (_preserveFocusOnRescan)
-        {
-            _preserveFocusOnRescan = false;
-            FocusManager.Instance?.ReplaceGroupsSilent(groups);
-        }
-        else
-        {
+        if (!SetGroupsWithRestore(groups))
             FocusManager.Instance?.SetGroups(groups);
-        }
 
         _log?.LogInfo($"Menu scan: {group.Elements.Count} elements on {page.gameObject?.name}");
     }
@@ -2828,10 +2824,9 @@ public class MenuNavigator : MonoBehaviour
             return; // Will not reach here normally; fallback handled by caller
         }
 
-        if (_preserveFocusOnRescan)
+        if (SetGroupsWithRestore(groups))
         {
-            _preserveFocusOnRescan = false;
-            FocusManager.Instance?.ReplaceGroupsSilent(groups);
+            // Focus restored to pre-dialog group — no extra announcement needed
         }
         else
         {
@@ -3027,12 +3022,7 @@ public class MenuNavigator : MonoBehaviour
         }
 
         var groups = new List<FocusGroup> { group };
-        if (_preserveFocusOnRescan)
-        {
-            _preserveFocusOnRescan = false;
-            FocusManager.Instance?.ReplaceGroupsSilent(groups);
-        }
-        else
+        if (!SetGroupsWithRestore(groups))
         {
             FocusManager.Instance?.SetGroups(groups);
             ScreenReader.Instance.Say("Pets.");
@@ -3233,11 +3223,6 @@ public class MenuNavigator : MonoBehaviour
                         }
                     }
                     catch { }
-                    _log?.LogInfo($"DeckViewer pet '{name}': {rows.Count} info rows");
-                }
-                else
-                {
-                    _log?.LogInfo($"DeckViewer pet '{name}': template not found");
                 }
             }
             else // Food/Spell
@@ -3290,11 +3275,6 @@ public class MenuNavigator : MonoBehaviour
                         }
                     }
                     catch { }
-                    _log?.LogInfo($"DeckViewer food '{name}': {rows.Count} info rows");
-                }
-                else
-                {
-                    _log?.LogInfo($"DeckViewer food '{name}': template not found");
                 }
             }
 
@@ -3510,9 +3490,20 @@ public class MenuNavigator : MonoBehaviour
 
         // Fallback: just clear the dialog state
         IsDialogOpen = false;
-        _preserveFocusOnRescan = true;
         RequestRescan();
         _log?.LogInfo("Dialog dismissed (fallback)");
+    }
+
+    /// <summary>Sets focus groups while restoring to the saved group name (from before a dialog opened).
+    /// Uses SetGroupsRestoring to avoid double announcements. Returns true if restore was used.</summary>
+    private bool SetGroupsWithRestore(List<FocusGroup> groups)
+    {
+        if (_restoreGroupName == null) return false;
+        string groupName = _restoreGroupName;
+        int elementIndex = _restoreElementIndex;
+        _restoreGroupName = null;
+        FocusManager.Instance?.SetGroupsRestoring(groups, groupName, elementIndex);
+        return true;
     }
 
     public void GoBack()

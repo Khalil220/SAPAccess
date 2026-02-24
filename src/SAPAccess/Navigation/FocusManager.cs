@@ -34,6 +34,8 @@ public class FocusManager
     public FocusGroup? CurrentGroup =>
         _groups.Count > 0 ? _groups[_currentGroupIndex] : null;
 
+    public int CurrentElementIndex => _currentElementIndex;
+
     public event Action<FocusElement?>? FocusChanged;
 
     public FocusManager()
@@ -65,6 +67,50 @@ public class FocusManager
             FocusChanged?.Invoke(element);
             _log.LogDebug($"Focus: {element.Label}");
         }
+    }
+
+    /// <summary>Replaces all focus groups and restores focus to the named group and element index.
+    /// Announces the restored position with queued speech (won't interrupt prior announcements).
+    /// Used after dialog close to return to the pre-dialog position.</summary>
+    public void SetGroupsRestoring(List<FocusGroup> groups, string groupName, int elementIndex = 0)
+    {
+        _groups.Clear();
+        _groups.AddRange(groups);
+        _currentGroupIndex = 0;
+        _currentElementIndex = 0;
+        _currentInfoRow = 0;
+
+        for (int i = 0; i < _groups.Count; i++)
+        {
+            if (_groups[i].Name == groupName)
+            {
+                _currentGroupIndex = i;
+                break;
+            }
+        }
+
+        // Restore element index (clamped to new group size)
+        if (_groups.Count > 0)
+        {
+            var group = _groups[_currentGroupIndex];
+            _currentElementIndex = Math.Min(elementIndex, Math.Max(0, group.Elements.Count - 1));
+        }
+
+        // Announce restored position with queued speech so it follows "Selected: X"
+        var curGroup = CurrentGroup;
+        var element = CurrentElement;
+        if (curGroup != null && element != null)
+        {
+            string elementText;
+            if (element.InfoRows != null && element.InfoRows.Count > 0)
+                elementText = element.InfoRows[0];
+            else
+                elementText = element.GetDescription();
+
+            ScreenReader.Instance.Say($"{curGroup.Name}. {elementText}");
+        }
+
+        FocusChanged?.Invoke(CurrentElement);
     }
 
     /// <summary>Replaces focus groups while preserving the current position (for refreshes).
@@ -176,8 +222,7 @@ public class FocusManager
         if (_groups.Count <= 1) return;
         if (_currentGroupIndex <= 0) return; // Already at first group
 
-        _currentGroupIndex--;
-        ClampElementIndex();
+        SwitchToGroup(_currentGroupIndex - 1);
         _currentInfoRow = 0;
         AnnounceGroupAndFocus();
     }
@@ -188,8 +233,7 @@ public class FocusManager
         if (_groups.Count <= 1) return;
         if (_currentGroupIndex >= _groups.Count - 1) return; // Already at last group
 
-        _currentGroupIndex++;
-        ClampElementIndex();
+        SwitchToGroup(_currentGroupIndex + 1);
         _currentInfoRow = 0;
         AnnounceGroupAndFocus();
     }
@@ -235,8 +279,7 @@ public class FocusManager
         {
             if (_groups[i].Name == groupName)
             {
-                _currentGroupIndex = i;
-                _currentElementIndex = 0;
+                SwitchToGroup(i);
                 _currentInfoRow = 0;
                 AnnounceGroupAndFocus();
                 return;
@@ -251,11 +294,11 @@ public class FocusManager
     {
         if (_groups.Count <= 1) return;
 
-        _currentGroupIndex++;
-        if (_currentGroupIndex >= _groups.Count)
-            _currentGroupIndex = 0;
+        int next = _currentGroupIndex + 1;
+        if (next >= _groups.Count)
+            next = 0;
 
-        ClampElementIndex();
+        SwitchToGroup(next);
         _currentInfoRow = 0;
         AnnounceGroupAndFocus();
     }
@@ -319,6 +362,28 @@ public class FocusManager
         _log.LogDebug($"Focus: {group.Name}");
     }
 
+    /// <summary>Saves element index to departing group, switches to new group index,
+    /// and restores that group's saved element index (clamped).</summary>
+    private void SwitchToGroup(int newGroupIndex)
+    {
+        // Save position in current group
+        if (_groups.Count > 0 && _currentGroupIndex < _groups.Count)
+            _groups[_currentGroupIndex].SavedElementIndex = _currentElementIndex;
+
+        _currentGroupIndex = newGroupIndex;
+
+        // Restore position from new group
+        if (_groups.Count > 0 && _currentGroupIndex < _groups.Count)
+        {
+            var group = _groups[_currentGroupIndex];
+            _currentElementIndex = Math.Min(group.SavedElementIndex, Math.Max(0, group.Elements.Count - 1));
+        }
+        else
+        {
+            _currentElementIndex = 0;
+        }
+    }
+
     private void ClampElementIndex()
     {
         if (_groups.Count == 0) return;
@@ -333,6 +398,9 @@ public class FocusGroup
 {
     public string Name { get; }
     public List<FocusElement> Elements { get; } = new();
+
+    /// <summary>Remembered element index so each group keeps its own cursor position.</summary>
+    public int SavedElementIndex { get; set; }
 
     public FocusGroup(string name)
     {
