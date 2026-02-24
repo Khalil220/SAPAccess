@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using BepInEx.Logging;
+using SAPAccess.Announcements;
 using SAPAccess.GameState;
 using SAPAccess.NVDA;
 using TMPro;
@@ -9,9 +10,11 @@ using UnityEngine.EventSystems;
 namespace SAPAccess.Navigation;
 
 /// <summary>
-/// Scans the active menu page for ButtonBase and TMP_InputField components,
+/// Scans the active menu page for ButtonBase, TMP_InputField, and text components,
 /// populates FocusManager so the user can navigate menus with arrow keys.
 /// Manages an editing mode for text input fields.
+/// Handles Picker dialogs (choice prompts, confirmations) across all game phases.
+/// Builds shop-phase focus groups for navigating shop pets, food, and team.
 /// </summary>
 public class MenuNavigator : MonoBehaviour
 {
@@ -29,6 +32,68 @@ public class MenuNavigator : MonoBehaviour
     private TMP_InputField? _pendingActivation;
     private int _editStartFrame = -1;
     private string _trackedText = "";
+
+    /// <summary>True when a dialog (Alert2 or Picker) is open.</summary>
+    public bool IsDialogOpen { get; private set; }
+    private bool _needsPickerScan;
+    private float _pickerScanDelay;
+    private GamePhase _lastPhase = GamePhase.Unknown;
+
+    // Alert2 polling state
+    private Spacewood.Unity.Alert2? _cachedAlert;
+    private bool _alertWasOpen;
+
+    // Picker polling state
+    private Spacewood.Unity.UI.Picker? _cachedPicker;
+    private bool _pickerWasActive;
+
+    // Dock (team naming) polling state
+    private Spacewood.Unity.MonoBehaviours.Build.Dock? _cachedDock;
+    private bool _dockWasActive;
+
+    // TallyArena (battle result screen) polling state
+    private Spacewood.Unity.TallyArena? _cachedTally;
+    private bool _tallyWasActive;
+    private bool _tallyAnnouncedResult;
+    private bool _needsTallyRead;
+    private float _tallyReadDelay;
+
+    // Post-game screens polling state (appear after final battle)
+    private Spacewood.Unity.TallyArenaFinale? _cachedFinale;
+    private bool _finaleWasActive;
+    private Spacewood.Unity.TallyArenaReward? _cachedReward;
+    private bool _rewardWasActive;
+    private Spacewood.Unity.TallyArenaMenu? _cachedTallyMenu;
+    private bool _tallyMenuWasActive;
+
+    // Pending food targeting: user selected a food item, now needs to pick a team pet
+    private Spacewood.Core.Models.SpellModel? _pendingFood;
+    private string? _pendingFoodName;
+
+    // Fallback game-start detection (HangarPatches may not fire for async methods)
+    private float _hangarCheckTimer;
+
+    // Cached HangarMain reference for shop actions
+    private Spacewood.Unity.MonoBehaviours.Build.HangarMain? _cachedHangar;
+
+    // Shop refresh state
+    private bool _needsShopRefresh;
+    private float _shopRefreshDelay;
+
+    // Post-battle delayed setup (board data is stale when HangarMain first appears)
+    private bool _needsPostBattleSetup;
+    private float _postBattleDelay;
+
+    // Pre-battle snapshots for detecting battle result (PreviousOutcome is unreliable)
+    private int _preBattleLives;
+    private int _preBattleVictories;
+
+    // Flag to announce gold after refresh (for roll, where gold is stale at call time)
+    private bool _announceGoldAfterRefresh;
+
+    // DeckViewer (pack preview) polling state
+    private Spacewood.Unity.MonoBehaviours.Build.DeckViewer? _cachedDeckViewer;
+    private bool _deckViewerWasActive;
 
     public void Awake()
     {
@@ -48,15 +113,192 @@ public class MenuNavigator : MonoBehaviour
 
     public void Update()
     {
-        // Active during menu phases and initial login (Unknown phase)
         var phase = GamePhaseTracker.Instance.CurrentPhase;
-        if (phase == GamePhase.Shop || phase == GamePhase.Battle)
-            return;
 
-        // Prevent Unity's EventSystem from routing keyboard input to UI elements.
-        // Without this, Enter/Space get routed to whatever button Unity has selected,
-        // causing rogue button activations alongside our own input handling.
-        if (!IsEditing)
+        // Clear stale menu focus groups on phase transition to Shop/Battle
+        if (phase != _lastPhase)
+        {
+            if (phase == GamePhase.Shop || phase == GamePhase.Battle)
+            {
+                FocusManager.Instance?.Clear();
+                _needsScan = false;
+                _log?.LogInfo($"Cleared menu focus groups on phase transition to {phase}");
+            }
+
+            // Snapshot lives/victories before battle for result detection
+            if (phase == GamePhase.Battle)
+            {
+                _preBattleLives = ShopStateReader.Instance.Lives;
+                _preBattleVictories = ShopStateReader.Instance.Victories;
+                _log?.LogInfo($"Pre-battle snapshot: Lives={_preBattleLives}, Victories={_preBattleVictories}");
+            }
+
+            // Clear cached UI references on scene transitions to avoid
+            // accessing destroyed IL2CPP objects (causes native crashes)
+            if (phase == GamePhase.Battle)
+            {
+                _cachedAlert = null;
+                _alertWasOpen = false;
+                _cachedPicker = null;
+                _pickerWasActive = false;
+                _cachedDock = null;
+                _dockWasActive = false;
+                _cachedTally = null;
+                _tallyWasActive = false;
+                _tallyAnnouncedResult = false;
+                _needsTallyRead = false;
+                _cachedFinale = null;
+                _finaleWasActive = false;
+                _cachedReward = null;
+                _rewardWasActive = false;
+                _cachedTallyMenu = null;
+                _tallyMenuWasActive = false;
+                _cachedDeckViewer = null;
+                _deckViewerWasActive = false;
+                IsDialogOpen = false;
+            }
+
+            _lastPhase = phase;
+        }
+
+        // Poll for active dialogs (Alert2, Picker, Dock, DeckViewer) — skip during battle
+        // (scene is different, these objects don't exist and stale refs crash)
+        if (phase != GamePhase.Battle)
+        {
+            PollForAlert();
+            PollForPicker();
+            PollForDock();
+            PollForDeckViewer();
+        }
+
+        // Poll for TallyArena and post-game screens during battle phase
+        if (phase == GamePhase.Battle)
+        {
+            PollForTally();
+            PollForFinale();
+            PollForReward();
+            PollForTallyMenu();
+        }
+
+        // Delayed TallyArena read (wait for ShowStatus to activate containers)
+        if (_needsTallyRead)
+        {
+            _tallyReadDelay -= Time.deltaTime;
+            if (_tallyReadDelay <= 0f)
+            {
+                _needsTallyRead = false;
+                OnTallyOpened();
+            }
+        }
+
+        // Handle picker scans regardless of game phase
+        if (_needsPickerScan)
+        {
+            _pickerScanDelay -= Time.deltaTime;
+            if (_pickerScanDelay <= 0f)
+            {
+                _needsPickerScan = false;
+                ScanPicker();
+            }
+        }
+
+        // Detect HangarMain in scene — handles initial game start (from menus)
+        // AND return to shop after battle (phase is still Battle but shop scene reloaded)
+        if (phase != GamePhase.Shop)
+        {
+            _hangarCheckTimer -= Time.deltaTime;
+            if (_hangarCheckTimer <= 0f)
+            {
+                _hangarCheckTimer = 0.5f;
+                try
+                {
+                    var hangar = Object.FindObjectOfType<Spacewood.Unity.MonoBehaviours.Build.HangarMain>();
+                    if (hangar != null && hangar.BuildModel != null)
+                    {
+                        bool returningFromBattle = (phase == GamePhase.Battle);
+                        _log?.LogInfo($"HangarMain detected in scene — entering Shop phase (fromBattle={returningFromBattle})");
+                        GamePhaseTracker.Instance.CurrentPhase = GamePhase.Shop;
+                        phase = GamePhase.Shop; // Update local var
+
+                        _cachedHangar = hangar;
+                        if (ShopAnnouncer.Instance != null)
+                            ShopAnnouncer.Instance.Hangar = hangar;
+
+                        _needsScan = false;
+                        _lastPhase = phase;
+
+                        if (returningFromBattle)
+                        {
+                            // Delay post-battle setup: BoardModel data (turn, gold,
+                            // PreviousOutcome) is stale when HangarMain first appears.
+                            // Wait for the server to populate updated data.
+                            _needsPostBattleSetup = true;
+                            _postBattleDelay = 1.5f;
+                            _log?.LogInfo("Post-battle setup deferred (1.5s delay)");
+                        }
+                        // If the Dock (team naming) screen is active, defer shop setup
+                        // until it closes — don't overwrite the naming focus groups
+                        else if (!_dockWasActive)
+                        {
+                            var board = hangar.BuildModel?.Board;
+                            if (board != null)
+                            {
+                                ShopStateReader.Instance.ReadFromBoard(board);
+                                TeamStateReader.Instance.ReadFromBoard(board);
+                            }
+                            ShopAnnouncer.Instance?.OnTurnStart();
+                            BuildShopFocusGroups(hangar);
+                        }
+                        else
+                        {
+                            _log?.LogInfo("Dock is active — deferring shop setup");
+                        }
+                    }
+                }
+                catch (System.Exception ex)
+                {
+                    _log?.LogError($"HangarMain detection error: {ex}");
+                }
+            }
+        }
+
+        // Post-battle delayed setup (wait for server to populate new turn data)
+        if (_needsPostBattleSetup && phase == GamePhase.Shop)
+        {
+            _postBattleDelay -= Time.deltaTime;
+            if (_postBattleDelay <= 0f)
+            {
+                _needsPostBattleSetup = false;
+                PerformPostBattleSetup();
+            }
+        }
+
+        // Shop merge step 2 (stack newly bought pet onto target)
+        if (_needsMergeStep2 && phase == GamePhase.Shop)
+        {
+            _mergeStep2Delay -= Time.deltaTime;
+            if (_mergeStep2Delay <= 0f)
+            {
+                _needsMergeStep2 = false;
+                CompleteMergeStep2();
+            }
+        }
+
+        // Shop-phase refresh (after roll, buy, sell, freeze)
+        if (_needsShopRefresh && phase == GamePhase.Shop)
+        {
+            _shopRefreshDelay -= Time.deltaTime;
+            if (_shopRefreshDelay <= 0f)
+            {
+                _needsShopRefresh = false;
+                RefreshShopState();
+            }
+        }
+
+        bool inMenu = phase != GamePhase.Shop && phase != GamePhase.Battle;
+
+        // Prevent Unity's EventSystem from routing keyboard input to UI elements
+        if (!IsEditing && (inMenu || IsDialogOpen || phase == GamePhase.Shop))
         {
             try
             {
@@ -67,18 +309,32 @@ public class MenuNavigator : MonoBehaviour
             catch { }
         }
 
+        // During Shop/Battle, only dialog/refresh logic runs (handled above)
+        if (!inMenu)
+            return;
+
+        // ── Menu-phase logic below ──
+
         if (_needsScan)
         {
-            _scanDelay -= Time.deltaTime;
-            if (_scanDelay <= 0f)
+            // Don't rescan the page while a dialog is open — it would overwrite
+            // the dialog's focus groups (e.g. alert Confirm/Cancel buttons)
+            if (IsDialogOpen)
             {
                 _needsScan = false;
-                ScanCurrentPage();
+            }
+            else
+            {
+                _scanDelay -= Time.deltaTime;
+                if (_scanDelay <= 0f)
+                {
+                    _needsScan = false;
+                    ScanCurrentPage();
+                }
             }
         }
 
-        // Delayed activation: activate the input field one frame after Enter was pressed
-        // so TMP_InputField doesn't process the same Enter as a submit
+        // Delayed activation: activate the input field one frame after Enter
         if (_pendingActivation != null && Time.frameCount > _editStartFrame)
         {
             try
@@ -95,19 +351,13 @@ public class MenuNavigator : MonoBehaviour
 
         if (IsEditing)
         {
-            // Track text every frame so we have the latest value
-            // (TMP_InputField reverts text on Escape/cancel before we can read it)
             try
             {
                 if (_activeInputField != null)
-                {
-                    string current = _activeInputField.text ?? "";
-                    _trackedText = current;
-                }
+                    _trackedText = _activeInputField.text ?? "";
             }
             catch { }
 
-            // Enter exits editing mode (skip the frame editing started)
             if (Time.frameCount > _editStartFrame + 1 && Input.GetKeyDown(KeyCode.Return))
             {
                 StopEditing(announce: true);
@@ -115,14 +365,1832 @@ public class MenuNavigator : MonoBehaviour
         }
     }
 
-    /// <summary>Triggers a rescan of the current page for buttons.</summary>
     public void RequestRescan()
     {
         _needsScan = true;
         _scanDelay = 0.2f;
     }
 
-    /// <summary>Begins editing the given input field.</summary>
+    /// <summary>Schedules a shop state refresh after a short delay (for roll, buy, sell, freeze).
+    /// If announceGold is true, the refreshed gold value will be spoken after the refresh.</summary>
+    public void ScheduleShopRefresh(bool announceGold = false)
+    {
+        _needsShopRefresh = true;
+        _shopRefreshDelay = 0.5f;
+        if (announceGold)
+            _announceGoldAfterRefresh = true;
+    }
+
+    private void RefreshShopState()
+    {
+        if (_cachedHangar == null)
+        {
+            try { _cachedHangar = Object.FindObjectOfType<Spacewood.Unity.MonoBehaviours.Build.HangarMain>(); }
+            catch { }
+        }
+        if (_cachedHangar == null) return;
+
+        try
+        {
+            var board = _cachedHangar.BuildModel?.Board;
+            if (board != null)
+            {
+                ShopStateReader.Instance.ReadFromBoard(board);
+                TeamStateReader.Instance.ReadFromBoard(board);
+                BuildShopFocusGroups(_cachedHangar, silent: true);
+
+                if (_announceGoldAfterRefresh)
+                {
+                    _announceGoldAfterRefresh = false;
+                    ScreenReader.Instance.Say($"Rolled. {ShopStateReader.Instance.Gold} gold remaining.");
+                }
+
+                _log?.LogInfo("Shop state refreshed");
+            }
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"Shop refresh error: {ex}");
+        }
+    }
+
+    // ── Shop Focus Groups ────────────────────────────────────────────
+
+    /// <summary>Builds focus groups for navigating shop pets, food, and team during shop phase.
+    /// Each element uses InfoRows for the buffer system (name → stats → extras).</summary>
+    private void BuildShopFocusGroups(Spacewood.Unity.MonoBehaviours.Build.HangarMain hangar, bool silent = false)
+    {
+        var board = hangar.BuildModel?.Board;
+        if (board == null) return;
+
+        var groups = new List<FocusGroup>();
+
+        // ── Shop group (pets + food) ──
+        var shopGroup = new FocusGroup("Shop");
+        try
+        {
+            if (board.MinionShop != null)
+            {
+                for (int i = 0; i < board.MinionShop.Count; i++)
+                {
+                    var minion = board.MinionShop[i];
+                    if (minion == null) continue;
+
+                    string name = GetMinionName(minion);
+                    int atk = minion.Attack?.Total ?? 0;
+                    int hp = minion.Health?.Total ?? 0;
+
+                    // Build info rows
+                    var rows = new List<string>();
+                    rows.Add(name); // Row 0: Name
+                    rows.Add($"{atk} attack, {hp} health"); // Row 1: Stats
+                    string costRow = $"{minion.Price} gold";
+                    if (minion.Frozen) costRow += ", frozen";
+                    rows.Add(costRow); // Row 2: Cost + frozen
+
+                    // Row 3: Ability description
+                    string? ability = null;
+                    try { ability = Spacewood.Unity.Extensions.MinionModelExtensions.GetAbilityLocalized(minion); } catch { }
+                    if (!string.IsNullOrWhiteSpace(ability))
+                        rows.Add(StripRichText(ability!));
+
+                    var capturedMinion = minion;
+                    var capturedHangar = hangar;
+                    var capturedName = name;
+                    var element = new FocusElement(name, i)
+                    {
+                        Type = "button",
+                        Tag = capturedMinion,
+                        InfoRows = rows,
+                        OnActivate = () => BuyPet(capturedHangar, capturedMinion, capturedName)
+                    };
+                    shopGroup.Elements.Add(element);
+                }
+            }
+        }
+        catch (System.Exception ex) { _log?.LogError($"Shop pets scan error: {ex}"); }
+
+        try
+        {
+            if (board.SpellShop != null)
+            {
+                for (int i = 0; i < board.SpellShop.Count; i++)
+                {
+                    var spell = board.SpellShop[i];
+                    if (spell == null) continue;
+
+                    string name = GetSpellName(spell);
+
+                    // Build info rows
+                    var rows = new List<string>();
+                    rows.Add(name); // Row 0: Name
+                    string costRow = $"{spell.Price} gold";
+                    if (spell.Frozen) costRow += ", frozen";
+                    rows.Add(costRow); // Row 1: Cost + frozen
+
+                    // Row 2: Ability description
+                    string? spellAbility = null;
+                    try { spellAbility = Spacewood.Unity.Extensions.SpellModelExtensions.GetAbilityLocalized(spell); } catch { }
+                    if (!string.IsNullOrWhiteSpace(spellAbility))
+                        rows.Add(StripRichText(spellAbility!));
+
+                    // Row 3: Perk fine print (detailed effect, e.g. "Takes 2 less damage")
+                    string? finePrint = null;
+                    try { finePrint = Spacewood.Unity.Extensions.SpellModelExtensions.GetFinePrintLocalized(spell, board); } catch { }
+                    if (!string.IsNullOrWhiteSpace(finePrint))
+                        rows.Add(StripRichText(finePrint!));
+
+                    var capturedSpell = spell;
+                    var capturedHangar = hangar;
+                    var capturedName = name;
+                    var element = new FocusElement(name, shopGroup.Elements.Count + i)
+                    {
+                        Type = "button",
+                        Tag = capturedSpell,
+                        InfoRows = rows,
+                        OnActivate = () => BuyFood(capturedHangar, capturedSpell, capturedName)
+                    };
+                    shopGroup.Elements.Add(element);
+                }
+            }
+        }
+        catch (System.Exception ex) { _log?.LogError($"Shop food scan error: {ex}"); }
+
+        if (shopGroup.Elements.Count > 0)
+            groups.Add(shopGroup);
+
+        // ── Team group (sorted by position so cycling order matches battle order) ──
+        var teamGroup = new FocusGroup("Team");
+        try
+        {
+            if (board.Minions?.Items != null)
+            {
+                // Collect team pets with their positions, then sort by x (front to back)
+                var teamPets = new List<(Spacewood.Core.Models.MinionModel minion, int x)>();
+                for (int i = 0; i < board.Minions.Items.Count; i++)
+                {
+                    var m = board.Minions.Items[i];
+                    if (m == null || m.Dead) continue;
+                    teamPets.Add((m, m.Point.x));
+                }
+                teamPets.Sort((a, b) => a.x.CompareTo(b.x));
+
+                for (int i = 0; i < teamPets.Count; i++)
+                {
+                    var minion = teamPets[i].minion;
+                    string name = GetMinionName(minion);
+                    int atk = minion.Attack?.Total ?? 0;
+                    int hp = minion.Health?.Total ?? 0;
+
+                    // Build info rows
+                    var rows = new List<string>();
+                    rows.Add(name); // Row 0: Name
+                    rows.Add($"{atk} attack, {hp} health"); // Row 1: Stats
+
+                    // Row 2: Level + XP progress + held item
+                    int level = minion.Level;
+                    int exp = 0;
+                    try { exp = minion.Exp; } catch { }
+                    // SAP XP thresholds: Level 1 needs 2 XP, Level 2 needs 3 XP, max Level 3
+                    string levelText;
+                    if (level >= 3)
+                        levelText = "Level 3 (max)";
+                    else
+                    {
+                        int needed = level == 1 ? 2 : 3; // XP needed for next level
+                        levelText = $"Level {level}, {exp}/{needed} XP";
+                    }
+                    string extraRow = levelText;
+                    string? perkTitle = null;
+                    try { perkTitle = Spacewood.Unity.Extensions.MinionModelExtensions.GetPerkTitleLocalized(minion); } catch { }
+                    if (string.IsNullOrWhiteSpace(perkTitle))
+                    {
+                        // Fallback to enum name
+                        try { if (minion.Perk.HasValue) perkTitle = minion.Perk.Value.ToString(); } catch { }
+                    }
+                    if (!string.IsNullOrWhiteSpace(perkTitle))
+                        extraRow += $", holding {perkTitle}";
+                    rows.Add(extraRow);
+
+                    // Row 3: Ability description
+                    string? ability = null;
+                    try { ability = Spacewood.Unity.Extensions.MinionModelExtensions.GetAbilityLocalized(minion); } catch { }
+                    if (!string.IsNullOrWhiteSpace(ability))
+                        rows.Add(StripRichText(ability!));
+
+                    // Row 4: Held item effect (if has perk)
+                    if (!string.IsNullOrWhiteSpace(perkTitle))
+                    {
+                        string? perkAbility = null;
+                        try { perkAbility = Spacewood.Unity.Extensions.MinionModelExtensions.GetPerkAbilityLocalized(minion); } catch { }
+                        if (!string.IsNullOrWhiteSpace(perkAbility))
+                            rows.Add($"{perkTitle}: {StripRichText(perkAbility!)}");
+                    }
+
+                    var element = new FocusElement(name, i)
+                    {
+                        Type = "button",
+                        Tag = minion,
+                        InfoRows = rows
+                    };
+                    teamGroup.Elements.Add(element);
+                }
+            }
+        }
+        catch (System.Exception ex) { _log?.LogError($"Team scan error: {ex}"); }
+
+        if (teamGroup.Elements.Count > 0)
+            groups.Add(teamGroup);
+
+        if (groups.Count > 0)
+        {
+            if (silent)
+                FocusManager.Instance?.ReplaceGroupsSilent(groups);
+            else
+                FocusManager.Instance?.SetGroups(groups);
+        }
+
+        _log?.LogInfo($"Shop focus groups built: {shopGroup.Elements.Count} shop items, {teamGroup.Elements.Count} team pets");
+    }
+
+    private void BuyPet(
+        Spacewood.Unity.MonoBehaviours.Build.HangarMain hangar,
+        Spacewood.Core.Models.MinionModel minion,
+        string name)
+    {
+        try
+        {
+            var board = hangar.BuildModel?.Board;
+            if (board == null)
+            {
+                ScreenReader.Instance.Say("Cannot buy.");
+                return;
+            }
+
+            // Check gold
+            if (board.Gold < minion.Price)
+            {
+                ScreenReader.Instance.Say($"Not enough gold. Need {minion.Price}, have {board.Gold}.");
+                return;
+            }
+
+            // Count current team size
+            int teamSize = 0;
+            if (board.Minions?.Items != null)
+            {
+                for (int i = 0; i < board.Minions.Items.Count; i++)
+                {
+                    var m = board.Minions.Items[i];
+                    if (m != null && !m.Dead) teamSize++;
+                }
+            }
+
+            if (teamSize >= 5)
+            {
+                ScreenReader.Instance.Say("Team is full.");
+                return;
+            }
+
+            var targetPoint = new Spacewood.Core.System.Point(teamSize, 0);
+            hangar.PlayMinionAsync(minion, targetPoint, null);
+
+            ScreenReader.Instance.Say($"Bought {name}.");
+            _log?.LogInfo($"Buy pet: {name} at position {teamSize}");
+            ScheduleShopRefresh();
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"Buy pet error: {ex}");
+            ScreenReader.Instance.Say("Buy failed.");
+        }
+    }
+
+    private void BuyFood(
+        Spacewood.Unity.MonoBehaviours.Build.HangarMain hangar,
+        Spacewood.Core.Models.SpellModel spell,
+        string name)
+    {
+        try
+        {
+            var board = hangar.BuildModel?.Board;
+            if (board == null)
+            {
+                ScreenReader.Instance.Say("Cannot buy.");
+                return;
+            }
+
+            // Check gold
+            if (board.Gold < spell.Price)
+            {
+                ScreenReader.Instance.Say($"Not enough gold. Need {spell.Price}, have {board.Gold}.");
+                return;
+            }
+
+            // Enter food targeting mode — user must select a team pet next
+            _pendingFood = spell;
+            _pendingFoodName = name;
+            ScreenReader.Instance.Say($"{name} selected. Press B, choose a target pet, then press Enter.");
+            _log?.LogInfo($"Food targeting started: {name}");
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"Buy food error: {ex}");
+            ScreenReader.Instance.Say("Buy failed.");
+        }
+    }
+
+    /// <summary>Applies the pending food item to the specified team pet.</summary>
+    public void ApplyPendingFood(Spacewood.Core.Models.MinionModel target, string targetName)
+    {
+        if (_pendingFood == null || _cachedHangar == null)
+        {
+            ScreenReader.Instance.Say("No food selected.");
+            return;
+        }
+
+        try
+        {
+            var spell = _pendingFood;
+            var foodName = _pendingFoodName ?? "food";
+            _pendingFood = null;
+            _pendingFoodName = null;
+
+            _cachedHangar.PlaySpellAsync(spell, target);
+            ScreenReader.Instance.Say($"Used {foodName} on {targetName}.");
+            _log?.LogInfo($"Food applied: {foodName} → {targetName}");
+            ScheduleShopRefresh();
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"Apply food error: {ex}");
+            ScreenReader.Instance.Say("Failed to use food.");
+            _pendingFood = null;
+            _pendingFoodName = null;
+        }
+    }
+
+    /// <summary>Cancels the pending food targeting mode.</summary>
+    public void CancelPendingFood()
+    {
+        if (_pendingFood != null)
+        {
+            _pendingFood = null;
+            _pendingFoodName = null;
+            ScreenReader.Instance.Say("Food cancelled.");
+        }
+    }
+
+    /// <summary>Whether there is a pending food item waiting for a target pet.</summary>
+    public bool HasPendingFood => _pendingFood != null;
+
+    /// <summary>Merges the focused pet onto a matching pet.
+    /// Shop pet focused → buys and merges onto a matching team pet (PlayMinionAsync).
+    /// Team pet focused → merges with a matching teammate (StackMinionAsync).</summary>
+    public void MergePet()
+    {
+        if (_cachedHangar == null)
+        {
+            ScreenReader.Instance.Say("Cannot merge.");
+            return;
+        }
+
+        var groupName = FocusManager.Instance?.CurrentGroup?.Name;
+        var element = FocusManager.Instance?.CurrentElement;
+
+        if (element?.Tag is not Spacewood.Core.Models.MinionModel focusedMinion)
+        {
+            ScreenReader.Instance.Say("Focus a pet to merge.");
+            return;
+        }
+
+        if (groupName == "Shop")
+            MergeFromShop(focusedMinion, element.Label);
+        else if (groupName == "Team")
+            MergeOnTeam(focusedMinion, element.Label);
+        else
+            ScreenReader.Instance.Say("Focus a pet to merge.");
+    }
+
+    // Pending shop merge: after buying, stack onto this team pet
+    private Spacewood.Core.Models.Item.ItemId? _pendingMergeTargetId;
+    private string? _pendingMergeName;
+    private bool _needsMergeStep2;
+    private float _mergeStep2Delay;
+
+    private void MergeFromShop(Spacewood.Core.Models.MinionModel shopMinion, string shopName)
+    {
+        try
+        {
+            var board = _cachedHangar!.BuildModel?.Board;
+            if (board?.Minions?.Items == null)
+            {
+                ScreenReader.Instance.Say("No team pets to merge with.");
+                return;
+            }
+
+            if (board.Gold < shopMinion.Price)
+            {
+                ScreenReader.Instance.Say($"Not enough gold. Need {shopMinion.Price}, have {board.Gold}.");
+                return;
+            }
+
+            // Find a matching team pet (same species)
+            Spacewood.Core.Models.MinionModel? target = null;
+            string targetName = "";
+            for (int i = 0; i < board.Minions.Items.Count; i++)
+            {
+                var m = board.Minions.Items[i];
+                if (m == null || m.Dead) continue;
+                if (m.Enum == shopMinion.Enum)
+                {
+                    target = m;
+                    targetName = GetMinionName(m);
+                    break;
+                }
+            }
+
+            if (target == null)
+            {
+                ScreenReader.Instance.Say($"No matching {shopName} on your team to merge with.");
+                return;
+            }
+
+            // Count current team size to determine placement position
+            int teamSize = 0;
+            for (int i = 0; i < board.Minions.Items.Count; i++)
+            {
+                var m = board.Minions.Items[i];
+                if (m != null && !m.Dead) teamSize++;
+            }
+
+            if (teamSize >= 5)
+            {
+                ScreenReader.Instance.Say("Team is full. Sell a pet first to make room for merge.");
+                return;
+            }
+
+            // Step 1: Buy the pet to an empty slot
+            var emptyPoint = new Spacewood.Core.System.Point(teamSize, 0);
+            _cachedHangar.PlayMinionAsync(shopMinion, emptyPoint, null);
+
+            // Step 2: After a short delay, stack the newly bought pet onto the target
+            _pendingMergeTargetId = target.Id;
+            _pendingMergeName = targetName;
+            _needsMergeStep2 = true;
+            _mergeStep2Delay = 0.8f;
+
+            ScreenReader.Instance.Say($"Merging {shopName} onto {targetName}...");
+            _log?.LogInfo($"Shop merge step 1: bought {shopName}, will stack onto {targetName}");
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"Shop merge error: {ex}");
+            ScreenReader.Instance.Say("Merge failed.");
+        }
+    }
+
+    /// <summary>Step 2 of shop merge: find the newly bought pet and stack it onto the target.</summary>
+    private void CompleteMergeStep2()
+    {
+        if (_cachedHangar == null || _pendingMergeTargetId == null) return;
+
+        try
+        {
+            var board = _cachedHangar.BuildModel?.Board;
+            if (board?.Minions?.Items == null) return;
+
+            var targetId = _pendingMergeTargetId.Value;
+            var targetName = _pendingMergeName ?? "pet";
+
+            // Find the target pet to get its Enum
+            Spacewood.Core.Models.MinionModel? targetPet = null;
+            for (int i = 0; i < board.Minions.Items.Count; i++)
+            {
+                var m = board.Minions.Items[i];
+                if (m == null || m.Dead) continue;
+                if (m.Id.Unique == targetId.Unique)
+                {
+                    targetPet = m;
+                    break;
+                }
+            }
+
+            if (targetPet == null)
+            {
+                _log?.LogWarning("Merge step 2: target pet not found");
+                ScheduleShopRefresh();
+                return;
+            }
+
+            // Find the newly bought pet (same species, different ID from target)
+            Spacewood.Core.Models.MinionModel? newPet = null;
+            for (int i = 0; i < board.Minions.Items.Count; i++)
+            {
+                var m = board.Minions.Items[i];
+                if (m == null || m.Dead) continue;
+                if (m.Enum == targetPet.Enum && m.Id.Unique != targetId.Unique)
+                {
+                    newPet = m;
+                    break;
+                }
+            }
+
+            if (newPet == null)
+            {
+                _log?.LogWarning("Merge step 2: new pet not found (buy may have failed)");
+                ScheduleShopRefresh();
+                return;
+            }
+
+            _cachedHangar.StackMinionAsync(newPet, targetId);
+            ScreenReader.Instance.Say($"Merged onto {targetName}.");
+            _log?.LogInfo($"Shop merge step 2: stacked onto {targetName}");
+            ScheduleShopRefresh();
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"Merge step 2 error: {ex}");
+            ScreenReader.Instance.Say("Merge failed.");
+            ScheduleShopRefresh();
+        }
+        finally
+        {
+            _pendingMergeTargetId = null;
+            _pendingMergeName = null;
+        }
+    }
+
+    private void MergeOnTeam(Spacewood.Core.Models.MinionModel sourceMinion, string sourceName)
+    {
+        try
+        {
+            var board = _cachedHangar!.BuildModel?.Board;
+            if (board?.Minions?.Items == null)
+            {
+                ScreenReader.Instance.Say("No team pets to merge with.");
+                return;
+            }
+
+            // Find another team pet of the same species (not the same instance)
+            Spacewood.Core.Models.MinionModel? target = null;
+            string targetName = "";
+            for (int i = 0; i < board.Minions.Items.Count; i++)
+            {
+                var m = board.Minions.Items[i];
+                if (m == null || m.Dead) continue;
+                if (m.Enum == sourceMinion.Enum && m.Id.Unique != sourceMinion.Id.Unique)
+                {
+                    target = m;
+                    targetName = GetMinionName(m);
+                    break;
+                }
+            }
+
+            if (target == null)
+            {
+                ScreenReader.Instance.Say($"No other {sourceName} on your team to merge with.");
+                return;
+            }
+
+            _cachedHangar.StackMinionAsync(sourceMinion, target.Id);
+            ScreenReader.Instance.Say($"Merged {sourceName} onto {targetName}.");
+            _log?.LogInfo($"Team merge: {sourceName} → {targetName}");
+            ScheduleShopRefresh();
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"Team merge error: {ex}");
+            ScreenReader.Instance.Say("Merge failed.");
+        }
+    }
+
+    /// <summary>Moves the currently focused team pet left or right by one position.</summary>
+    public void ShiftPet(int direction)
+    {
+        if (_cachedHangar == null) return;
+
+        // Only allow shifting team pets
+        if (FocusManager.Instance?.CurrentGroup?.Name != "Team")
+        {
+            ScreenReader.Instance.Say("No team pet focused.");
+            return;
+        }
+
+        var element = FocusManager.Instance?.CurrentElement;
+        if (element?.Tag is not Spacewood.Core.Models.MinionModel minion)
+        {
+            ScreenReader.Instance.Say("No team pet focused.");
+            return;
+        }
+
+        try
+        {
+            var board = _cachedHangar.BuildModel?.Board;
+            if (board?.Minions?.Items == null) return;
+
+            // Build sorted list of team pets by x position (left = front, right = back)
+            var teamPets = new List<(Spacewood.Core.Models.MinionModel model, string name, int x)>();
+            for (int i = 0; i < board.Minions.Items.Count; i++)
+            {
+                var m = board.Minions.Items[i];
+                if (m == null || m.Dead) continue;
+                teamPets.Add((m, GetMinionName(m), m.Point.x));
+            }
+            teamPets.Sort((a, b) => a.x.CompareTo(b.x));
+
+            // Find current pet in sorted list
+            int currentIdx = -1;
+            for (int i = 0; i < teamPets.Count; i++)
+            {
+                if (teamPets[i].model.Id.Unique == minion.Id.Unique)
+                {
+                    currentIdx = i;
+                    break;
+                }
+            }
+            if (currentIdx < 0) return;
+
+            int targetIdx = currentIdx + direction;
+            if (targetIdx < 0 || targetIdx >= teamPets.Count)
+            {
+                ScreenReader.Instance.Say(direction < 0 ? "Already at front." : "Already at back.");
+                return;
+            }
+
+            // Use the game's OrderMinion to properly update the model + hash
+            var minionA = teamPets[currentIdx].model;
+            var pointB = teamPets[targetIdx].model.Point;
+
+            Spacewood.Core.Actions.Board.BoardExtensions.OrderMinion(board, minionA.Id, pointB);
+            _log?.LogInfo($"OrderMinion: {teamPets[currentIdx].name} to Point({pointB.x},{pointB.y})");
+
+            // Visual update
+            try { _cachedHangar.BoardView?.OrderMinion(minionA.Id, pointB, 0.3f); } catch { }
+
+            // Build announcement based on new position
+            // After swap: our pet is at targetIdx, displaced pet is at currentIdx
+            string petName = teamPets[currentIdx].name;
+            string displacedName = teamPets[targetIdx].name;
+            string posAnnouncement;
+
+            if (targetIdx == 0)
+            {
+                posAnnouncement = $"{petName} shifted to front.";
+            }
+            else if (targetIdx == teamPets.Count - 1)
+            {
+                posAnnouncement = $"{petName} shifted to back.";
+            }
+            else
+            {
+                // Our pet is now at targetIdx. Figure out neighbors in the new order.
+                // The displaced pet moved to currentIdx.
+                string leftName, rightName;
+                if (direction < 0)
+                {
+                    // Shifted left: left neighbor is unchanged, right neighbor is the displaced pet
+                    leftName = teamPets[targetIdx - 1].name;
+                    rightName = displacedName;
+                }
+                else
+                {
+                    // Shifted right: left neighbor is the displaced pet, right neighbor is unchanged
+                    leftName = displacedName;
+                    rightName = teamPets[targetIdx + 1].name;
+                }
+                posAnnouncement = $"{petName} shifted between {leftName} and {rightName}.";
+            }
+
+            ScreenReader.Instance.Say(posAnnouncement);
+            _log?.LogInfo($"Pet shifted: {petName} to position {targetIdx}");
+
+            ScheduleShopRefresh();
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"Shift pet error: {ex}");
+            ScreenReader.Instance.Say("Shift failed.");
+        }
+    }
+
+    /// <summary>Called after a delay when returning from battle. Board data should be populated by now.</summary>
+    private void PerformPostBattleSetup()
+    {
+        if (_cachedHangar == null) return;
+
+        try
+        {
+            // Skip if TallyArena already announced the result (avoids duplicate/conflicting announcements)
+            if (_tallyAnnouncedResult)
+            {
+                _log?.LogInfo("Skipping post-battle announcement (TallyArena already announced)");
+                _tallyAnnouncedResult = false;
+            }
+            else
+            {
+                AnnounceBattleResult(_cachedHangar);
+            }
+
+            if (!_dockWasActive)
+            {
+                var board = _cachedHangar.BuildModel?.Board;
+                if (board != null)
+                {
+                    ShopStateReader.Instance.ReadFromBoard(board);
+                    TeamStateReader.Instance.ReadFromBoard(board);
+                }
+                ShopAnnouncer.Instance?.OnTurnStart();
+                BuildShopFocusGroups(_cachedHangar);
+            }
+            else
+            {
+                _log?.LogInfo("Dock is active — deferring shop setup after battle");
+            }
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"Post-battle setup error: {ex}");
+        }
+    }
+
+    /// <summary>Announces the battle result by comparing lives/victories before and after.</summary>
+    private void AnnounceBattleResult(Spacewood.Unity.MonoBehaviours.Build.HangarMain hangar)
+    {
+        try
+        {
+            var board = hangar.BuildModel?.Board;
+            if (board == null) return;
+
+            int newLives = board.Lives;
+            int newVictories = board.Victories;
+            _log?.LogInfo($"Post-battle: Lives={newLives} (was {_preBattleLives}), Victories={newVictories} (was {_preBattleVictories})");
+
+            string result;
+            if (newVictories > _preBattleVictories)
+            {
+                result = "You won!";
+            }
+            else if (newLives < _preBattleLives)
+            {
+                int livesLost = _preBattleLives - newLives;
+                result = $"You lost. Lost {livesLost} {(livesLost == 1 ? "life" : "lives")}. {newLives} remaining.";
+            }
+            else
+            {
+                result = "Draw.";
+            }
+
+            ScreenReader.Instance.Say(result);
+            _log?.LogInfo($"Battle result announced: {result}");
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"Battle result error: {ex}");
+        }
+    }
+
+    /// <summary>Strips Unity rich text tags (e.g. &lt;color&gt;, &lt;b&gt;) from a string for screen reader output.</summary>
+    private static string StripRichText(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        // Remove all XML-style tags: <tag>, </tag>, <tag=value>, <tag="value">
+        return System.Text.RegularExpressions.Regex.Replace(text, "<[^>]+>", "").Trim();
+    }
+
+    private static string GetMinionName(Spacewood.Core.Models.MinionModel minion)
+    {
+        try
+        {
+            return Spacewood.Unity.Extensions.MinionModelExtensions.GetNameLocalized(minion)
+                ?? minion.Enum.ToString();
+        }
+        catch { return minion.Enum.ToString(); }
+    }
+
+    private static string GetSpellName(Spacewood.Core.Models.SpellModel spell)
+    {
+        try
+        {
+            return Spacewood.Unity.Extensions.SpellModelExtensions.GetNameLocalized(spell)
+                ?? spell.Enum.ToString();
+        }
+        catch { return spell.Enum.ToString(); }
+    }
+
+    // ── Alert2 Dialog Polling ────────────────────────────────────────
+
+    /// <summary>Polls each frame for Alert2 dialog visibility.</summary>
+    private void PollForAlert()
+    {
+        try
+        {
+            if (_cachedAlert == null)
+            {
+                _cachedAlert = Object.FindObjectOfType<Spacewood.Unity.Alert2>();
+                if (_cachedAlert == null) return;
+            }
+
+            bool isOpen = false;
+            try { isOpen = _cachedAlert.IsOpen; } catch { }
+
+            if (isOpen && !_alertWasOpen)
+            {
+                _alertWasOpen = true;
+                OnAlertOpened();
+            }
+            else if (!isOpen && _alertWasOpen)
+            {
+                _alertWasOpen = false;
+                OnAlertClosed();
+            }
+        }
+        catch { }
+    }
+
+    private void OnAlertOpened()
+    {
+        IsDialogOpen = true;
+
+        string text = "";
+        try { text = _cachedAlert!.TextMesh?.text ?? ""; } catch { }
+
+        var group = new FocusGroup("Dialog");
+        var elements = new List<(float y, FocusElement element)>();
+
+        // Confirm button
+        try
+        {
+            var confirmBtn = _cachedAlert!.ConfirmButton;
+            if (confirmBtn != null)
+            {
+                string label = "";
+                try { label = confirmBtn.Label?.text ?? "Confirm"; } catch { label = "Confirm"; }
+                float yPos = 0f;
+                try { yPos = confirmBtn.transform.position.y; } catch { }
+
+                var capturedBtn = confirmBtn;
+                elements.Add((yPos, new FocusElement(label)
+                {
+                    Type = "button",
+                    Tag = capturedBtn,
+                    OnActivate = () =>
+                    {
+                        try { capturedBtn.Click(); }
+                        catch (System.Exception ex) { _log?.LogError($"Alert button click error: {ex}"); }
+                    }
+                }));
+            }
+        }
+        catch { }
+
+        // Cancel button
+        try
+        {
+            var cancelBtn = _cachedAlert!.CancelButton;
+            if (cancelBtn != null)
+            {
+                string label = "";
+                try { label = cancelBtn.Label?.text ?? "Cancel"; } catch { label = "Cancel"; }
+                float yPos = 0f;
+                try { yPos = cancelBtn.transform.position.y; } catch { }
+
+                var capturedBtn = cancelBtn;
+                elements.Add((yPos, new FocusElement(label)
+                {
+                    Type = "button",
+                    Tag = capturedBtn,
+                    OnActivate = () =>
+                    {
+                        try { capturedBtn.Click(); }
+                        catch (System.Exception ex) { _log?.LogError($"Alert button click error: {ex}"); }
+                    }
+                }));
+            }
+        }
+        catch { }
+
+        if (elements.Count == 0) return;
+
+        elements.Sort((a, b) => b.y.CompareTo(a.y));
+        for (int i = 0; i < elements.Count; i++)
+        {
+            elements[i].element.SlotIndex = i;
+            group.Elements.Add(elements[i].element);
+        }
+
+        FocusManager.Instance?.SetGroups(new List<FocusGroup> { group });
+
+        if (!string.IsNullOrWhiteSpace(text))
+            ScreenReader.Instance.Say(text);
+
+        _log?.LogInfo($"Alert dialog detected: {text}");
+    }
+
+    private void OnAlertClosed()
+    {
+        if (!IsDialogOpen) return;
+        IsDialogOpen = false;
+
+        var phase = GamePhaseTracker.Instance.CurrentPhase;
+        if (phase == GamePhase.Shop || phase == GamePhase.Battle)
+        {
+            // Rebuild shop focus groups instead of just clearing
+            if (phase == GamePhase.Shop && _cachedHangar != null)
+                ScheduleShopRefresh();
+            else
+                FocusManager.Instance?.Clear();
+        }
+        else
+            RequestRescan();
+
+        _log?.LogInfo("Alert dialog closed");
+    }
+
+    // ── Picker Dialog Polling ────────────────────────────────────────
+
+    /// <summary>Polls each frame for Picker visibility changes.</summary>
+    private void PollForPicker()
+    {
+        try
+        {
+            if (_cachedPicker == null)
+            {
+                _cachedPicker = Object.FindObjectOfType<Spacewood.Unity.UI.Picker>();
+                if (_cachedPicker == null) return;
+            }
+
+            bool isActive = false;
+            try
+            {
+                // Check if Picker's Canvas is enabled (more reliable than Container)
+                var canvas = _cachedPicker.GetComponentInParent<Canvas>();
+                if (canvas != null)
+                    isActive = canvas.enabled && canvas.gameObject.activeInHierarchy;
+                else
+                    isActive = _cachedPicker.Container != null
+                        && _cachedPicker.Container.gameObject != null
+                        && _cachedPicker.Container.gameObject.activeInHierarchy;
+            }
+            catch { }
+
+            if (isActive && !_pickerWasActive)
+            {
+                _pickerWasActive = true;
+                OnPickerOpened();
+            }
+            else if (!isActive && _pickerWasActive)
+            {
+                _pickerWasActive = false;
+                if (IsDialogOpen)
+                    OnPickerClosed();
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>Called when a Picker dialog becomes visible.</summary>
+    public void OnPickerOpened()
+    {
+        if (IsDialogOpen) return;
+        IsDialogOpen = true;
+        _needsPickerScan = true;
+        _pickerScanDelay = 0.15f;
+        _log?.LogInfo("Picker dialog detected");
+    }
+
+    /// <summary>Called from MenuPatches when Picker closes (Pick or backdrop).</summary>
+    public void OnPickerClosed(string? chosenLabel = null)
+    {
+        if (!IsDialogOpen) return;
+        IsDialogOpen = false;
+        _needsPickerScan = false;
+
+        if (!string.IsNullOrWhiteSpace(chosenLabel))
+            ScreenReader.Instance.Say($"Selected: {chosenLabel}");
+
+        var phase = GamePhaseTracker.Instance.CurrentPhase;
+        if (phase == GamePhase.Shop || phase == GamePhase.Battle)
+        {
+            // Rebuild shop focus groups instead of just clearing
+            if (phase == GamePhase.Shop && _cachedHangar != null)
+                ScheduleShopRefresh();
+            else
+                FocusManager.Instance?.Clear();
+        }
+        else
+            RequestRescan();
+
+        _log?.LogInfo("Picker dialog closed");
+    }
+
+    private void ScanPicker()
+    {
+        Spacewood.Unity.UI.Picker? picker = null;
+        try { picker = Object.FindObjectOfType<Spacewood.Unity.UI.Picker>(); } catch { }
+        if (picker == null)
+        {
+            _log?.LogWarning("Picker not found for scan");
+            IsDialogOpen = false;
+            return;
+        }
+
+        string title = "";
+        try { title = picker.Title?.text ?? ""; } catch { }
+        string note = "";
+        try { note = picker.Note?.text ?? ""; } catch { }
+
+        var group = new FocusGroup("Dialog");
+        var elements = new List<(float y, FocusElement element)>();
+
+        // Scan picker buttons
+        try
+        {
+            var pickerButtons = picker.Buttons;
+            if (pickerButtons != null)
+            {
+                for (int i = 0; i < pickerButtons.Count; i++)
+                {
+                    var pb = pickerButtons[i];
+                    if (pb?.Primary == null) continue;
+
+                    string label = "";
+                    try { label = pb.Primary.GetTitle(); } catch { }
+                    if (string.IsNullOrWhiteSpace(label))
+                        try { label = pb.Primary.Label?.text ?? ""; } catch { }
+                    if (string.IsNullOrWhiteSpace(label)) continue;
+
+                    // Check for tooltip/description
+                    string? tooltip = null;
+                    try { tooltip = pb.Tooltip?.Text?.text; } catch { }
+
+                    float yPos = 0f;
+                    try { yPos = pb.transform.position.y; } catch { }
+
+                    var capturedPb = pb;
+                    var capturedLabel = label;
+                    var element = new FocusElement(label)
+                    {
+                        Type = "button",
+                        Tag = capturedPb,
+                        OnActivate = () =>
+                        {
+                            try
+                            {
+                                _log?.LogInfo($"Activating picker button: {capturedLabel}");
+                                capturedPb.Primary.Click();
+                            }
+                            catch (System.Exception ex)
+                            {
+                                _log?.LogError($"Picker button click error: {ex}");
+                            }
+                        }
+                    };
+
+                    if (!string.IsNullOrWhiteSpace(tooltip))
+                        element.Detail = tooltip;
+
+                    elements.Add((yPos, element));
+                }
+            }
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"Picker button scan error: {ex}");
+        }
+
+        if (elements.Count == 0)
+        {
+            _log?.LogWarning("No picker buttons found");
+            return;
+        }
+
+        // Sort top-to-bottom
+        elements.Sort((a, b) => b.y.CompareTo(a.y));
+
+        for (int i = 0; i < elements.Count; i++)
+        {
+            elements[i].element.SlotIndex = i;
+            group.Elements.Add(elements[i].element);
+        }
+
+        var groups = new List<FocusGroup> { group };
+        FocusManager.Instance?.SetGroups(groups);
+
+        // Announce dialog title
+        string announcement = title;
+        if (!string.IsNullOrWhiteSpace(note))
+            announcement += ". " + note;
+        if (!string.IsNullOrWhiteSpace(announcement))
+            ScreenReader.Instance.Say(announcement);
+
+        _log?.LogInfo($"Picker scan: {group.Elements.Count} options. Title: {title}");
+    }
+
+    // ── TallyArena (Battle Result) Polling ─────────────────────────
+
+    /// <summary>Polls for the TallyArena (battle result screen) during battle phase.</summary>
+    private void PollForTally()
+    {
+        try
+        {
+            if (_cachedTally == null)
+            {
+                _cachedTally = Object.FindObjectOfType<Spacewood.Unity.TallyArena>();
+                if (_cachedTally == null) return;
+            }
+
+            bool isActive = false;
+            try
+            {
+                isActive = _cachedTally.Canvas != null
+                    && _cachedTally.Canvas.enabled
+                    && _cachedTally.Canvas.gameObject.activeInHierarchy;
+            }
+            catch { }
+
+            if (isActive && !_tallyWasActive)
+            {
+                _tallyWasActive = true;
+                // Delay reading — ShowStatus() hasn't activated the containers yet
+                _needsTallyRead = true;
+                _tallyReadDelay = 0.8f;
+                _log?.LogInfo("TallyArena Canvas detected, waiting for status containers...");
+            }
+            else if (!isActive && _tallyWasActive)
+            {
+                _tallyWasActive = false;
+                _cachedTally = null;
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>Called after a delay when the TallyArena battle result screen is visible.</summary>
+    private void OnTallyOpened()
+    {
+        _log?.LogInfo("TallyArena reading result...");
+
+        // Determine result from which status container is active
+        string result = "";
+        try
+        {
+            var tally = _cachedTally!;
+            if (tally.StatusVictoryContainer != null && tally.StatusVictoryContainer.gameObject.activeSelf)
+                result = "Victory";
+            else if (tally.StatusVictoryFinaleContainer != null && tally.StatusVictoryFinaleContainer.gameObject.activeSelf)
+                result = "Victory";
+            else if (tally.StatusLossContainer != null && tally.StatusLossContainer.gameObject.activeSelf)
+                result = "Defeat";
+            else if (tally.StatusLossFinaleContainer != null && tally.StatusLossFinaleContainer.gameObject.activeSelf)
+                result = "Defeat";
+            else if (tally.StatusDrawContainer != null && tally.StatusDrawContainer.gameObject.activeSelf)
+                result = "Draw";
+            else if (tally.StatusDrawFinaleContainer != null && tally.StatusDrawFinaleContainer.gameObject.activeSelf)
+                result = "Draw";
+        }
+        catch { }
+
+        // Fallback: read Status TextMeshProUGUI and look for keywords
+        if (string.IsNullOrEmpty(result))
+        {
+            try
+            {
+                string? statusText = _cachedTally!.Status?.text;
+                if (!string.IsNullOrWhiteSpace(statusText))
+                {
+                    string upper = statusText!.ToUpperInvariant();
+                    if (upper.Contains("VICTORY") || upper.Contains("WON"))
+                        result = "Victory";
+                    else if (upper.Contains("DEFEAT") || upper.Contains("LOSS") || upper.Contains("LOST"))
+                        result = "Defeat";
+                    else if (upper.Contains("DRAW"))
+                        result = "Draw";
+                    else
+                        result = StripRichText(statusText!).Split('\n')[0].Trim();
+
+                    _log?.LogInfo($"TallyArena Status.text: '{statusText}'");
+                }
+            }
+            catch { }
+        }
+
+        if (string.IsNullOrEmpty(result))
+            result = "Battle result";
+
+        _tallyAnnouncedResult = true;
+        ScreenReader.Instance.Say($"{result}. Press Enter to continue.");
+        _log?.LogInfo($"TallyArena result: {result}");
+    }
+
+    /// <summary>Dismisses the TallyArena by clicking its continue button.</summary>
+    public void DismissTally()
+    {
+        if (_cachedTally == null || !_tallyWasActive) return;
+
+        try
+        {
+            var button = _cachedTally.Button;
+            if (button != null)
+            {
+                // Simulate submit on the SelectableBase
+                var eventData = new UnityEngine.EventSystems.BaseEventData(EventSystem.current);
+                UnityEngine.EventSystems.ExecuteEvents.Execute(
+                    button.gameObject,
+                    eventData,
+                    UnityEngine.EventSystems.ExecuteEvents.submitHandler);
+                _log?.LogInfo("TallyArena dismissed via submit");
+            }
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"TallyArena dismiss error: {ex}");
+        }
+    }
+
+    // ── Post-Game Screens (Finale, Reward, Menu) ────────────────────
+
+    /// <summary>Polls for the TallyArenaFinale (game over / claim reward) screen.</summary>
+    private void PollForFinale()
+    {
+        try
+        {
+            if (_cachedFinale == null)
+            {
+                _cachedFinale = Object.FindObjectOfType<Spacewood.Unity.TallyArenaFinale>();
+                if (_cachedFinale == null) return;
+            }
+
+            bool isActive = false;
+            try
+            {
+                isActive = _cachedFinale.Canvas != null
+                    && _cachedFinale.Canvas.enabled
+                    && _cachedFinale.Canvas.gameObject.activeInHierarchy;
+            }
+            catch { }
+
+            if (isActive && !_finaleWasActive)
+            {
+                _finaleWasActive = true;
+                OnFinaleOpened();
+            }
+            else if (!isActive && _finaleWasActive)
+            {
+                _finaleWasActive = false;
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>Called when the TallyArenaFinale (game over / claim reward) screen appears.</summary>
+    private void OnFinaleOpened()
+    {
+        _log?.LogInfo("TallyArenaFinale (game over) detected");
+
+        string announcement = "Game over.";
+        try
+        {
+            var finale = _cachedFinale!;
+            int victories = finale.Victories;
+            announcement = $"Game over. {victories} {(victories == 1 ? "victory" : "victories")}.";
+        }
+        catch { }
+
+        // Check for claim button
+        try
+        {
+            var claimBtn = _cachedFinale!.ClaimButton;
+            if (claimBtn != null)
+            {
+                announcement += " Press Enter to claim reward.";
+            }
+            else
+            {
+                var selectableBtn = _cachedFinale!.Button;
+                if (selectableBtn != null)
+                    announcement += " Press Enter to continue.";
+            }
+        }
+        catch
+        {
+            announcement += " Press Enter to continue.";
+        }
+
+        ScreenReader.Instance.Say(announcement);
+        _log?.LogInfo($"Finale: {announcement}");
+    }
+
+    /// <summary>Dismisses the TallyArenaFinale by clicking its button.</summary>
+    public void DismissFinale()
+    {
+        if (_cachedFinale == null || !_finaleWasActive) return;
+
+        try
+        {
+            // Try ClaimButton first (ButtonBase — use Click)
+            var claimBtn = _cachedFinale.ClaimButton;
+            if (claimBtn != null)
+            {
+                claimBtn.Click();
+                _log?.LogInfo("TallyArenaFinale claimed via ClaimButton");
+                return;
+            }
+
+            // Fallback: SelectableBase Button (use submit event)
+            var button = _cachedFinale.Button;
+            if (button != null)
+            {
+                var eventData = new UnityEngine.EventSystems.BaseEventData(EventSystem.current);
+                UnityEngine.EventSystems.ExecuteEvents.Execute(
+                    button.gameObject,
+                    eventData,
+                    UnityEngine.EventSystems.ExecuteEvents.submitHandler);
+                _log?.LogInfo("TallyArenaFinale dismissed via submit");
+            }
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"TallyArenaFinale dismiss error: {ex}");
+        }
+    }
+
+    /// <summary>Polls for the TallyArenaReward (unlockables) screen.</summary>
+    private void PollForReward()
+    {
+        try
+        {
+            if (_cachedReward == null)
+            {
+                _cachedReward = Object.FindObjectOfType<Spacewood.Unity.TallyArenaReward>();
+                if (_cachedReward == null) return;
+            }
+
+            bool isActive = false;
+            try
+            {
+                isActive = _cachedReward.Canvas != null
+                    && _cachedReward.Canvas.enabled
+                    && _cachedReward.Canvas.gameObject.activeInHierarchy;
+            }
+            catch { }
+
+            if (isActive && !_rewardWasActive)
+            {
+                _rewardWasActive = true;
+                OnRewardOpened();
+            }
+            else if (!isActive && _rewardWasActive)
+            {
+                _rewardWasActive = false;
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>Called when the TallyArenaReward (unlockables) screen appears.</summary>
+    private void OnRewardOpened()
+    {
+        _log?.LogInfo("TallyArenaReward (unlockables) detected");
+
+        string announcement = "";
+        try
+        {
+            // Read the reward label (e.g., "Unlocked")
+            string? rewardLabel = null;
+            try { rewardLabel = _cachedReward!.RewardLabel?.text; } catch { }
+
+            // Read the product label (name of what was unlocked)
+            string? productLabel = null;
+            try { productLabel = _cachedReward!.ProductLabel?.text; } catch { }
+
+            if (!string.IsNullOrWhiteSpace(rewardLabel) && !string.IsNullOrWhiteSpace(productLabel))
+                announcement = $"{StripRichText(rewardLabel!)} {StripRichText(productLabel!)}";
+            else if (!string.IsNullOrWhiteSpace(productLabel))
+                announcement = $"Unlocked: {StripRichText(productLabel!)}";
+            else if (!string.IsNullOrWhiteSpace(rewardLabel))
+                announcement = StripRichText(rewardLabel!);
+            else
+                announcement = "Reward unlocked";
+        }
+        catch { announcement = "Reward unlocked"; }
+
+        announcement += ". Press Enter to continue.";
+        ScreenReader.Instance.Say(announcement);
+        _log?.LogInfo($"Reward: {announcement}");
+    }
+
+    /// <summary>Dismisses the TallyArenaReward by clicking its button.</summary>
+    public void DismissReward()
+    {
+        if (_cachedReward == null || !_rewardWasActive) return;
+
+        try
+        {
+            var button = _cachedReward.Button;
+            if (button != null)
+            {
+                var eventData = new UnityEngine.EventSystems.BaseEventData(EventSystem.current);
+                UnityEngine.EventSystems.ExecuteEvents.Execute(
+                    button.gameObject,
+                    eventData,
+                    UnityEngine.EventSystems.ExecuteEvents.submitHandler);
+                _log?.LogInfo("TallyArenaReward dismissed via submit");
+            }
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"TallyArenaReward dismiss error: {ex}");
+        }
+    }
+
+    /// <summary>Polls for the TallyArenaMenu (post-game menu: play again, return, difficulty).</summary>
+    private void PollForTallyMenu()
+    {
+        try
+        {
+            if (_cachedTallyMenu == null)
+            {
+                _cachedTallyMenu = Object.FindObjectOfType<Spacewood.Unity.TallyArenaMenu>();
+                if (_cachedTallyMenu == null) return;
+            }
+
+            bool isActive = false;
+            try
+            {
+                isActive = _cachedTallyMenu.Canvas != null
+                    && _cachedTallyMenu.Canvas.enabled
+                    && _cachedTallyMenu.Canvas.gameObject.activeInHierarchy;
+            }
+            catch { }
+
+            if (isActive && !_tallyMenuWasActive)
+            {
+                _tallyMenuWasActive = true;
+                OnTallyMenuOpened();
+            }
+            else if (!isActive && _tallyMenuWasActive)
+            {
+                _tallyMenuWasActive = false;
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>Called when the TallyArenaMenu (post-game menu) appears.</summary>
+    private void OnTallyMenuOpened()
+    {
+        _log?.LogInfo("TallyArenaMenu (post-game menu) detected");
+
+        var groups = new List<FocusGroup>();
+        var menuGroup = new FocusGroup("Post-Game");
+        var elements = new List<FocusElement>();
+
+        try
+        {
+            var menu = _cachedTallyMenu!;
+
+            // Start New Game button
+            AddTallyMenuButton(elements, menu.StartNewGameButton, "Start New Game");
+
+            // Change Difficulty button
+            AddTallyMenuButton(elements, menu.ChangeDifficulty, "Change Difficulty");
+
+            // Watch Battle button
+            AddTallyMenuButton(elements, menu.WatchBattleButton, "Watch Battle");
+
+            // Spectate Match button
+            AddTallyMenuButton(elements, menu.SpectateMatchButton, "Spectate Match");
+
+            // Playback Opponent button
+            AddTallyMenuButton(elements, menu.PlaybackOpponentButton, "Watch Opponent");
+
+            // Return to Menu button
+            AddTallyMenuButton(elements, menu.ReturnToMenuButton, "Return to Menu");
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"TallyArenaMenu scan error: {ex}");
+        }
+
+        for (int i = 0; i < elements.Count; i++)
+        {
+            elements[i].SlotIndex = i;
+            menuGroup.Elements.Add(elements[i]);
+        }
+
+        if (menuGroup.Elements.Count > 0)
+        {
+            groups.Add(menuGroup);
+            FocusManager.Instance?.SetGroups(groups);
+        }
+
+        _log?.LogInfo($"TallyArenaMenu: {menuGroup.Elements.Count} buttons");
+    }
+
+    private void AddTallyMenuButton(
+        List<FocusElement> elements,
+        Spacewood.Unity.UI.SelectableBase? button,
+        string fallbackLabel)
+    {
+        if (button == null) return;
+        try
+        {
+            if (!button.gameObject.activeInHierarchy) return;
+        }
+        catch { return; }
+
+        // Try to read the button label
+        string label = fallbackLabel;
+        try
+        {
+            var btnBase = button as Spacewood.Unity.UI.ButtonBase;
+            if (btnBase != null)
+            {
+                string? title = null;
+                try { title = btnBase.GetTitle(); } catch { }
+                if (!string.IsNullOrWhiteSpace(title))
+                    label = title!;
+                else
+                {
+                    try { title = btnBase.Label?.text; } catch { }
+                    if (!string.IsNullOrWhiteSpace(title))
+                        label = title!;
+                }
+            }
+        }
+        catch { }
+
+        var capturedButton = button;
+        var capturedLabel = label;
+        elements.Add(new FocusElement(label)
+        {
+            Type = "button",
+            Tag = capturedButton,
+            OnActivate = () =>
+            {
+                try
+                {
+                    _log?.LogInfo($"Activating TallyMenu button: {capturedLabel}");
+                    var eventData = new UnityEngine.EventSystems.BaseEventData(EventSystem.current);
+                    UnityEngine.EventSystems.ExecuteEvents.Execute(
+                        capturedButton.gameObject,
+                        eventData,
+                        UnityEngine.EventSystems.ExecuteEvents.submitHandler);
+                }
+                catch (System.Exception ex)
+                {
+                    _log?.LogError($"TallyMenu button error: {ex}");
+                }
+            }
+        });
+    }
+
+    /// <summary>Handles Enter key during battle phase — dismisses active post-game screens.</summary>
+    public void DismissPostGameScreen()
+    {
+        if (_tallyWasActive)
+        {
+            DismissTally();
+            return;
+        }
+        if (_finaleWasActive)
+        {
+            DismissFinale();
+            return;
+        }
+        if (_rewardWasActive)
+        {
+            DismissReward();
+            return;
+        }
+        // TallyArenaMenu: handled by focus group activation (Enter on button)
+    }
+
+    // ── Dock (Team Naming) Polling ───────────────────────────────────
+
+    /// <summary>Polls for the Dock (team naming) screen visibility.</summary>
+    private void PollForDock()
+    {
+        try
+        {
+            if (_cachedDock == null)
+            {
+                _cachedDock = Object.FindObjectOfType<Spacewood.Unity.MonoBehaviours.Build.Dock>();
+                if (_cachedDock == null) return;
+            }
+
+            bool isActive = false;
+            try
+            {
+                // Dock is active when its Overlay canvas is enabled
+                isActive = _cachedDock.Overlay != null
+                    && _cachedDock.Overlay.enabled
+                    && _cachedDock.Overlay.gameObject.activeInHierarchy;
+            }
+            catch { }
+
+            // Fallback: check the Dock's own gameObject
+            if (!isActive)
+            {
+                try { isActive = _cachedDock.gameObject.activeInHierarchy && _cachedDock.ConfirmButton != null; }
+                catch { }
+            }
+
+            if (isActive && !_dockWasActive)
+            {
+                _dockWasActive = true;
+                OnDockOpened();
+            }
+            else if (!isActive && _dockWasActive)
+            {
+                _dockWasActive = false;
+                OnDockClosed();
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>Called when the Dock (team naming) screen becomes visible.</summary>
+    private void OnDockOpened()
+    {
+        IsDialogOpen = true;
+        _log?.LogInfo("Dock (team naming) screen detected");
+
+        var dock = _cachedDock;
+        if (dock == null) return;
+
+        var groups = new List<FocusGroup>();
+
+        // ── Adjectives group ──
+        var adjGroup = new FocusGroup("Adjective");
+        try
+        {
+            if (dock.AdjectiveContainer != null)
+            {
+                var boxes = dock.AdjectiveContainer.GetComponentsInChildren<Spacewood.Unity.MonoBehaviours.Build.DockBox>(false);
+                if (boxes != null)
+                {
+                    foreach (var box in boxes)
+                    {
+                        if (box == null) continue;
+                        string? text = null;
+                        try { text = box.TextMesh?.text; } catch { }
+                        if (string.IsNullOrWhiteSpace(text)) continue;
+
+                        var capturedBox = box;
+                        var capturedDock = dock;
+                        var element = new FocusElement(text!)
+                        {
+                            Type = "button",
+                            Tag = capturedBox,
+                            OnActivate = () =>
+                            {
+                                try
+                                {
+                                    capturedDock.FocusAdjective(capturedBox);
+                                    string? currentName = null;
+                                    try { currentName = capturedDock.NameTextMesh?.text; } catch { }
+                                    if (!string.IsNullOrWhiteSpace(currentName))
+                                        ScreenReader.Instance.Say($"Selected. Team name: {currentName}");
+                                    else
+                                        ScreenReader.Instance.Say($"Selected {text}.");
+                                }
+                                catch (System.Exception ex) { _log?.LogError($"Dock adjective error: {ex}"); }
+                            }
+                        };
+                        adjGroup.Elements.Add(element);
+                    }
+                }
+            }
+        }
+        catch (System.Exception ex) { _log?.LogError($"Dock adjective scan error: {ex}"); }
+
+        if (adjGroup.Elements.Count > 0)
+            groups.Add(adjGroup);
+
+        // ── Nouns group ──
+        var nounGroup = new FocusGroup("Noun");
+        try
+        {
+            if (dock.NounContainer != null)
+            {
+                var boxes = dock.NounContainer.GetComponentsInChildren<Spacewood.Unity.MonoBehaviours.Build.DockBox>(false);
+                if (boxes != null)
+                {
+                    foreach (var box in boxes)
+                    {
+                        if (box == null) continue;
+                        string? text = null;
+                        try { text = box.TextMesh?.text; } catch { }
+                        if (string.IsNullOrWhiteSpace(text)) continue;
+
+                        var capturedBox = box;
+                        var capturedDock = dock;
+                        var element = new FocusElement(text!)
+                        {
+                            Type = "button",
+                            Tag = capturedBox,
+                            OnActivate = () =>
+                            {
+                                try
+                                {
+                                    capturedDock.FocusNoun(capturedBox);
+                                    string? currentName = null;
+                                    try { currentName = capturedDock.NameTextMesh?.text; } catch { }
+                                    if (!string.IsNullOrWhiteSpace(currentName))
+                                        ScreenReader.Instance.Say($"Selected. Team name: {currentName}");
+                                    else
+                                        ScreenReader.Instance.Say($"Selected {text}.");
+                                }
+                                catch (System.Exception ex) { _log?.LogError($"Dock noun error: {ex}"); }
+                            }
+                        };
+                        nounGroup.Elements.Add(element);
+                    }
+                }
+            }
+        }
+        catch (System.Exception ex) { _log?.LogError($"Dock noun scan error: {ex}"); }
+
+        if (nounGroup.Elements.Count > 0)
+            groups.Add(nounGroup);
+
+        // ── Confirm button ──
+        try
+        {
+            var confirmBtn = dock.ConfirmButton;
+            if (confirmBtn != null)
+            {
+                var confirmGroup = new FocusGroup("Confirm");
+                string label = "Confirm";
+                try { label = confirmBtn.Label?.text ?? "Confirm"; } catch { }
+
+                var capturedBtn = confirmBtn;
+                confirmGroup.Elements.Add(new FocusElement(label)
+                {
+                    Type = "button",
+                    Tag = capturedBtn,
+                    OnActivate = () =>
+                    {
+                        try { capturedBtn.Click(); }
+                        catch (System.Exception ex) { _log?.LogError($"Dock confirm error: {ex}"); }
+                    }
+                });
+                groups.Add(confirmGroup);
+            }
+        }
+        catch { }
+
+        if (groups.Count > 0)
+            FocusManager.Instance?.SetGroups(groups);
+
+        // Announce the screen
+        string nameText = "";
+        try { nameText = dock.NameTextMesh?.text ?? ""; } catch { }
+        string announcement = "Name your team. Use Left and Right to browse adjectives and nouns. Tab to switch. Enter to select.";
+        if (!string.IsNullOrWhiteSpace(nameText))
+            announcement += $" Current name: {nameText}.";
+
+        ScreenReader.Instance.Say(announcement);
+        _log?.LogInfo($"Dock scan: {adjGroup.Elements.Count} adjectives, {nounGroup.Elements.Count} nouns");
+    }
+
+    /// <summary>Called when the Dock (team naming) screen closes.</summary>
+    private void OnDockClosed()
+    {
+        if (!IsDialogOpen) return;
+        IsDialogOpen = false;
+
+        var phase = GamePhaseTracker.Instance.CurrentPhase;
+        if (phase == GamePhase.Shop && _cachedHangar != null)
+        {
+            // Initialize shop now that the naming screen is gone
+            try
+            {
+                var board = _cachedHangar.BuildModel?.Board;
+                if (board != null)
+                {
+                    ShopStateReader.Instance.ReadFromBoard(board);
+                    TeamStateReader.Instance.ReadFromBoard(board);
+                }
+                ShopAnnouncer.Instance?.OnTurnStart();
+                BuildShopFocusGroups(_cachedHangar);
+            }
+            catch (System.Exception ex)
+            {
+                _log?.LogError($"Deferred shop setup error: {ex}");
+            }
+        }
+        else
+        {
+            FocusManager.Instance?.Clear();
+        }
+
+        _log?.LogInfo("Dock (team naming) closed");
+    }
+
+    // ── Editing Mode ─────────────────────────────────────────────────
+
     public void StartEditing(TMP_InputField inputField)
     {
         if (inputField == null) return;
@@ -130,9 +2198,6 @@ public class MenuNavigator : MonoBehaviour
         IsEditing = true;
         _activeInputField = inputField;
         _editStartFrame = Time.frameCount;
-
-        // Delay the actual ActivateInputField() by one frame so the Enter key
-        // that triggered this isn't processed by TMP_InputField as a submit
         _pendingActivation = inputField;
 
         try
@@ -150,7 +2215,6 @@ public class MenuNavigator : MonoBehaviour
         }
     }
 
-    /// <summary>Stops editing and reads back the field value.</summary>
     public void StopEditing(bool announce = true)
     {
         if (!IsEditing) return;
@@ -162,12 +2226,8 @@ public class MenuNavigator : MonoBehaviour
         {
             try
             {
-                // Use our tracked text — the field may have already reverted
                 string text = _trackedText;
-
                 _activeInputField.DeactivateInputField();
-
-                // Restore text in case TMP_InputField reverted it on cancel
                 _activeInputField.text = text;
 
                 if (announce)
@@ -183,6 +2243,168 @@ public class MenuNavigator : MonoBehaviour
         _trackedText = "";
     }
 
+    // ── Label Resolution ──────────────────────────────────────────────
+
+    /// <summary>Gets a meaningful label for a ButtonBase, using context when the label is unhelpful.
+    /// Returns null if no useful label can be determined (button should be skipped).</summary>
+    private static string? ResolveButtonLabel(Spacewood.Unity.UI.ButtonBase button)
+    {
+        // 1. Check for social media Link components — these show icon font glyphs as labels
+        try
+        {
+            if (button.GetComponent<Spacewood.Unity.LinkWebsite>() != null) return "Website";
+            if (button.GetComponent<Spacewood.Unity.LinkDiscord>() != null) return "Discord";
+            if (button.GetComponent<Spacewood.Unity.LinkTwitter>() != null) return "Twitter";
+            if (button.GetComponent<Spacewood.Unity.LinkEmail>() != null) return "Email";
+
+            // Also check parent for Link components (button might be a child)
+            if (button.GetComponentInParent<Spacewood.Unity.LinkWebsite>() != null) return "Website";
+            if (button.GetComponentInParent<Spacewood.Unity.LinkDiscord>() != null) return "Discord";
+            if (button.GetComponentInParent<Spacewood.Unity.LinkTwitter>() != null) return "Twitter";
+            if (button.GetComponentInParent<Spacewood.Unity.LinkEmail>() != null) return "Email";
+        }
+        catch { }
+
+        // 2. Try ButtonBase.GetTitle()
+        string? title = null;
+        try { title = button.GetTitle(); } catch { }
+        if (IsUsefulLabel(title)) return title!;
+
+        // 3. Try ButtonBase.Label.text
+        string? labelText = null;
+        try { labelText = button.Label?.text; } catch { }
+        if (IsUsefulLabel(labelText)) return labelText!;
+
+        // 4. Check if button is inside a ProductView (PackShop items) — read product name
+        try
+        {
+            var productView = button.GetComponentInParent<Spacewood.Unity.ProductView>();
+            if (productView != null)
+            {
+                string? productName = null;
+                try { productName = productView.Name?.text; } catch { }
+
+                string goName = button.gameObject?.name ?? "Button";
+
+                if (IsUsefulLabel(productName))
+                {
+                    // Include what action this button does
+                    if (goName.Contains("Buy")) return $"{productName}, Buy";
+                    if (goName.Contains("Showcase") || goName.Contains("Preview")) return $"{productName}, Preview";
+                    return productName!;
+                }
+            }
+        }
+        catch { }
+
+        // 5. Check for PackProduct band labels
+        try
+        {
+            var packProduct = button.GetComponentInParent<Spacewood.Unity.PackProduct>();
+            if (packProduct != null)
+            {
+                string? bandTop = null;
+                try { bandTop = packProduct.BandLabelTop?.text; } catch { }
+                string? bandBottom = null;
+                try { bandBottom = packProduct.BandLabelBottom?.text; } catch { }
+
+                string packName = IsUsefulLabel(bandBottom) ? bandBottom!
+                    : IsUsefulLabel(bandTop) ? bandTop!
+                    : null!;
+
+                if (packName != null)
+                {
+                    string goName = button.gameObject?.name ?? "Button";
+                    if (goName.Contains("Buy")) return $"{packName}, Buy";
+                    if (goName.Contains("Showcase") || goName.Contains("Preview")) return $"{packName}, Preview";
+                    return packName;
+                }
+            }
+        }
+        catch { }
+
+        // 6. Check for ProductShopItemShared (pet/food showcase items in pack shop)
+        try
+        {
+            var shared = button.GetComponentInParent<Spacewood.Unity.ProductShopItemShared>();
+            if (shared != null)
+            {
+                string? itemName = null;
+                try { itemName = shared.Name?.Text?.text; } catch { }
+                if (IsUsefulLabel(itemName))
+                {
+                    string goName = button.gameObject?.name ?? "Button";
+                    if (goName.Contains("Showcase") || goName.Contains("Preview")) return $"{itemName}, Preview";
+                    if (goName.Contains("Buy")) return $"{itemName}, Buy";
+                    return itemName!;
+                }
+            }
+        }
+        catch { }
+
+        // 7. Look for a nearby TMP_Text sibling that might describe this button
+        try
+        {
+            var parent = button.transform.parent;
+            if (parent != null)
+            {
+                var texts = parent.GetComponentsInChildren<TMP_Text>(false);
+                if (texts != null)
+                {
+                    foreach (var t in texts)
+                    {
+                        if (t == null) continue;
+                        // Skip the button's own label
+                        try { if (button.Label != null && t == (TMP_Text)button.Label) continue; } catch { }
+                        string? sibText = null;
+                        try { sibText = t.text; } catch { }
+                        if (IsUsefulLabel(sibText)) return sibText!;
+                    }
+                }
+            }
+        }
+        catch { }
+
+        // 8. Fall back to cleaned gameObject name; return null if it's just "Button"
+        string name = button.gameObject?.name ?? "Button";
+        string cleaned = CleanGameObjectName(name);
+        return cleaned == "Button" ? null : cleaned;
+    }
+
+    /// <summary>Checks if a label string is meaningful (not empty, not icon glyphs, not generic).</summary>
+    private static bool IsUsefulLabel(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        // Icon font characters are typically single non-ASCII chars or known bad values
+        if (text.Length <= 2 && text[0] > 127) return false;
+        // Filter known noise labels
+        if (text == "Swords" || text == "swords") return false;
+        if (text == "New" || text == "NEW") return false;
+        return true;
+    }
+
+    /// <summary>Cleans up a gameObject name into a readable label.</summary>
+    private static string CleanGameObjectName(string name)
+    {
+        // "BuyButton" → "Buy", "ShowcaseButton" → "Showcase"
+        if (name.EndsWith("Button"))
+            name = name.Substring(0, name.Length - 6);
+        if (name.EndsWith("Btn"))
+            name = name.Substring(0, name.Length - 3);
+        // Insert spaces before capitals: "PackShop" → "Pack Shop"
+        var result = new System.Text.StringBuilder();
+        for (int i = 0; i < name.Length; i++)
+        {
+            if (i > 0 && char.IsUpper(name[i]) && !char.IsUpper(name[i - 1]))
+                result.Append(' ');
+            result.Append(name[i]);
+        }
+        string cleaned = result.ToString().Trim();
+        return string.IsNullOrWhiteSpace(cleaned) ? "Button" : cleaned;
+    }
+
+    // ── Page Scanning ─────────────────────────────────────────────────
+
     private void ScanCurrentPage()
     {
         if (_menu == null)
@@ -195,12 +2417,9 @@ public class MenuNavigator : MonoBehaviour
             }
         }
 
-        // Determine which page to scan
         Spacewood.Unity.Page? page = _currentPage;
         if (page == null)
-        {
             page = _menu.PageManager?.CurrentPage;
-        }
 
         if (page == null)
         {
@@ -208,12 +2427,38 @@ public class MenuNavigator : MonoBehaviour
             return;
         }
 
-        var group = new FocusGroup(page.gameObject?.name ?? "Menu");
+        // ── Special handling: PackShop in arena selection mode ──
+        // When PlayBar is active, the player is selecting a pack before starting a run.
+        // Use a dedicated scan that shows packs as selectable items instead of purchase buttons.
+        try
+        {
+            var packShop = page.TryCast<Spacewood.Unity.PackShop>();
+            if (packShop != null)
+            {
+                bool isArenaSelection = false;
+                try { isArenaSelection = packShop.PlayBar != null && packShop.PlayBar.gameObject.activeSelf; } catch { }
 
-        // Collect all interactive elements with their vertical positions for sorting
+                if (isArenaSelection)
+                {
+                    ScanPackShopArenaMode(packShop);
+                    return;
+                }
+                else
+                {
+                    ScanPackShopStoreMode(packShop);
+                    return;
+                }
+            }
+        }
+        catch { }
+
+        var group = new FocusGroup(page.gameObject?.name ?? "Menu");
         var elements = new List<(float y, FocusElement element)>();
 
-        // Scan for TMP_InputField components
+        // Track which GameObjects are part of interactive elements (to skip in text scan)
+        var interactiveObjects = new HashSet<int>();
+
+        // ── Input fields ──
         var inputFields = page.GetComponentsInChildren<TMP_InputField>(false);
         if (inputFields != null)
         {
@@ -222,26 +2467,21 @@ public class MenuNavigator : MonoBehaviour
                 if (field == null) continue;
                 if (!field.interactable) continue;
 
+                try { if (field.gameObject != null) interactiveObjects.Add(field.gameObject.GetInstanceID()); } catch { }
+
                 string label;
                 try
                 {
                     var placeholder = field.placeholder as TMP_Text;
                     label = placeholder?.text ?? field.gameObject?.name ?? "Text field";
                 }
-                catch
-                {
-                    label = field.gameObject?.name ?? "Text field";
-                }
+                catch { label = field.gameObject?.name ?? "Text field"; }
 
                 if (string.IsNullOrWhiteSpace(label))
                     label = field.gameObject?.name ?? "Text field";
 
                 float yPos = 0f;
-                try
-                {
-                    yPos = field.transform.position.y;
-                }
-                catch { }
+                try { yPos = field.transform.position.y; } catch { }
 
                 var capturedField = field;
                 var capturedLabel = label;
@@ -264,44 +2504,25 @@ public class MenuNavigator : MonoBehaviour
                         StartEditing(capturedField);
                     }
                 };
-
                 elements.Add((yPos, element));
             }
         }
 
-        // Scan for ButtonBase components
+        // ── Buttons ──
         var buttons = page.GetComponentsInChildren<Spacewood.Unity.UI.ButtonBase>(false);
         if (buttons != null)
         {
             foreach (var button in buttons)
             {
                 if (button == null) continue;
+                try { if (!button.GetInteractable()) continue; } catch { continue; }
+                try { interactiveObjects.Add(button.gameObject.GetInstanceID()); } catch { }
 
-                try
-                {
-                    if (!button.GetInteractable()) continue;
-                }
-                catch { continue; }
-
-                string label;
-                try
-                {
-                    label = button.Label?.text ?? button.gameObject?.name ?? "Button";
-                }
-                catch
-                {
-                    label = button.gameObject?.name ?? "Button";
-                }
-
-                if (string.IsNullOrWhiteSpace(label))
-                    label = button.gameObject?.name ?? "Button";
+                string? label = ResolveButtonLabel(button);
+                if (label == null) continue; // Skip buttons with no useful label
 
                 float yPos = 0f;
-                try
-                {
-                    yPos = button.transform.position.y;
-                }
-                catch { }
+                try { yPos = button.transform.position.y; } catch { }
 
                 var capturedButton = button;
                 var capturedLabel = label;
@@ -311,6 +2532,14 @@ public class MenuNavigator : MonoBehaviour
                     Tag = capturedButton,
                     OnActivate = () =>
                     {
+                        // Guard: check if button still exists (IL2CPP throws on destroyed objects)
+                        try { _ = capturedButton.gameObject; }
+                        catch
+                        {
+                            ScreenReader.Instance.Say("Button no longer available.");
+                            return;
+                        }
+
                         try
                         {
                             _log?.LogInfo($"Activating button: {capturedLabel}");
@@ -323,9 +2552,94 @@ public class MenuNavigator : MonoBehaviour
                     }
                 };
 
+                // Add price and description from ProductView/ProductTemplate
+                try
+                {
+                    var productView = capturedButton.GetComponentInParent<Spacewood.Unity.ProductView>();
+                    if (productView != null)
+                    {
+                        var detailParts = new List<string>();
+
+                        // Read price
+                        string? price = null;
+                        try { price = productView.Price?.text; } catch { }
+                        if (!string.IsNullOrWhiteSpace(price))
+                            detailParts.Add(price!);
+
+                        // Read description from ProductTemplate
+                        string? desc = null;
+                        try { desc = productView.ProductTemplate?.Description; } catch { }
+                        if (!string.IsNullOrWhiteSpace(desc))
+                            detailParts.Add(desc!);
+
+                        if (detailParts.Count > 0)
+                            element.Detail = string.Join(". ", detailParts);
+                    }
+                }
+                catch { }
+
                 elements.Add((yPos, element));
             }
         }
+
+        // ── Standalone text (Label components that aren't part of interactive elements) ──
+        // Collect labels already used by buttons to avoid duplicates
+        var usedLabels = new HashSet<string>();
+        foreach (var (_, el) in elements)
+            usedLabels.Add(el.Label);
+
+        try
+        {
+            var labels = page.GetComponentsInChildren<Spacewood.Unity.UI.Label>(false);
+            if (labels != null)
+            {
+                foreach (var lbl in labels)
+                {
+                    if (lbl == null) continue;
+                    try { if (interactiveObjects.Contains(lbl.gameObject.GetInstanceID())) continue; } catch { }
+
+                    // Skip labels that are children of interactive elements (buttons, inputs, product items)
+                    bool isChildOfInteractive = false;
+                    try
+                    {
+                        var t = lbl.transform;
+                        while (t != null && t != page.transform)
+                        {
+                            try
+                            {
+                                if (t.gameObject != null && interactiveObjects.Contains(t.gameObject.GetInstanceID()))
+                                {
+                                    isChildOfInteractive = true;
+                                    break;
+                                }
+                            }
+                            catch { break; }
+                            t = t.parent;
+                        }
+                    }
+                    catch { }
+                    if (isChildOfInteractive) continue;
+
+                    string? text = null;
+                    try { text = lbl.Text?.text; } catch { }
+                    if (!IsUsefulLabel(text)) continue;
+
+                    // Skip if this text is already used by a button label
+                    if (usedLabels.Contains(text!)) continue;
+                    usedLabels.Add(text!);
+
+                    float yPos = 0f;
+                    try { yPos = lbl.transform.position.y; } catch { }
+
+                    var element = new FocusElement(text!)
+                    {
+                        Type = "text"
+                    };
+                    elements.Add((yPos, element));
+                }
+            }
+        }
+        catch { }
 
         if (elements.Count == 0)
         {
@@ -348,7 +2662,577 @@ public class MenuNavigator : MonoBehaviour
         _log?.LogInfo($"Menu scan: {group.Elements.Count} elements on {page.gameObject?.name}");
     }
 
-    /// <summary>Navigates back on the current page.</summary>
+    /// <summary>Specialized scan for PackShop when in arena selection mode (PlayBar visible).
+    /// Shows packs as selectable items with equipped state, plus Start/options buttons.</summary>
+    private void ScanPackShopArenaMode(Spacewood.Unity.PackShop packShop)
+    {
+        var packsGroup = new FocusGroup("Packs");
+        var optionsGroup = new FocusGroup("Options");
+
+        // ── Scan available packs ──
+        try
+        {
+            var products = packShop.Products;
+            if (products != null)
+            {
+                var equipped = packShop.EquippedProduct;
+                for (int i = 0; i < products.Count; i++)
+                {
+                    var product = products[i];
+                    if (product == null) continue;
+
+                    // Skip products that aren't visible
+                    try { if (product.gameObject != null && !product.gameObject.activeInHierarchy) continue; } catch { continue; }
+
+                    // Get pack name — prefer ProductTemplate.Name (the actual pack name)
+                    // over band labels (which often show generic text like "New Pets")
+                    string? name = null;
+                    try { name = product.ProductTemplate?.Name; } catch { }
+                    if (!IsUsefulLabel(name))
+                    {
+                        try { name = product.Name?.text; } catch { }
+                    }
+                    if (string.IsNullOrWhiteSpace(name))
+                        name = $"Pack {i + 1}";
+
+                    // Check owned/equipped state
+                    bool isOwned = false;
+                    try { isOwned = product.IsOwned; } catch { }
+                    bool isEquipped = false;
+                    try { isEquipped = (equipped != null && product == equipped); } catch { }
+
+                    string label = name!;
+                    if (isEquipped)
+                        label += ", selected";
+                    else if (!isOwned)
+                        label += ", not owned";
+
+                    var capturedProduct = product;
+                    var capturedShop = packShop;
+                    var element = new FocusElement(label, i)
+                    {
+                        Type = "button",
+                        Tag = capturedProduct,
+                        OnActivate = () =>
+                        {
+                            try
+                            {
+                                _log?.LogInfo($"Selecting pack: {name}");
+                                // Click the product's main button to select/equip it
+                                var btn = capturedProduct.Button;
+                                if (btn != null)
+                                    btn.Click();
+                                // Rescan after selection to update equipped state
+                                RequestRescan();
+                            }
+                            catch (System.Exception ex)
+                            {
+                                _log?.LogError($"Pack select error: {ex}");
+                            }
+                        }
+                    };
+
+                    // Add description from ProductTemplate
+                    try
+                    {
+                        string? desc = capturedProduct.ProductTemplate?.Description;
+                        if (!string.IsNullOrWhiteSpace(desc))
+                            element.Detail = desc;
+                    }
+                    catch { }
+
+                    packsGroup.Elements.Add(element);
+                }
+            }
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"PackShop arena scan error: {ex}");
+        }
+
+        // ── Options buttons (Start, Difficulty, etc.) ──
+        int optIdx = 0;
+        try
+        {
+            // Start/Continue button
+            var continueBtn = packShop.ContinueButton;
+            if (continueBtn != null)
+            {
+                try { if (!continueBtn.GetInteractable()) continueBtn = null; } catch { continueBtn = null; }
+            }
+            if (continueBtn != null)
+            {
+                string? contLabel = null;
+                try { contLabel = continueBtn.Label?.text; } catch { }
+                if (!IsUsefulLabel(contLabel)) contLabel = "Start";
+
+                var capturedBtn = continueBtn;
+                optionsGroup.Elements.Add(new FocusElement(contLabel!, optIdx++)
+                {
+                    Type = "button",
+                    OnActivate = () =>
+                    {
+                        try
+                        {
+                            _log?.LogInfo($"Activating: {contLabel}");
+                            capturedBtn.Click();
+                        }
+                        catch (System.Exception ex) { _log?.LogError($"Continue click error: {ex}"); }
+                    }
+                });
+            }
+
+            // Difficulty button
+            AddPackShopOption(optionsGroup, packShop.DifficultyButton, "Difficulty", ref optIdx);
+
+            // Create custom pack button
+            AddPackShopOption(optionsGroup, packShop.CreateCustomButton, "Create custom pack", ref optIdx);
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"PackShop options scan error: {ex}");
+        }
+
+        // ── Set focus groups ──
+        var groups = new List<FocusGroup>();
+        if (packsGroup.Elements.Count > 0) groups.Add(packsGroup);
+        if (optionsGroup.Elements.Count > 0) groups.Add(optionsGroup);
+
+        if (groups.Count == 0)
+        {
+            _log?.LogDebug("PackShop arena scan: no elements found, falling back to generic scan");
+            return; // Will not reach here normally; fallback handled by caller
+        }
+
+        FocusManager.Instance?.SetGroups(groups);
+
+        // Announce the equipped pack
+        string? equippedName = null;
+        try
+        {
+            var eq = packShop.EquippedProduct;
+            if (eq != null)
+            {
+                try { equippedName = eq.ProductTemplate?.Name; } catch { }
+                if (!IsUsefulLabel(equippedName))
+                {
+                    try { equippedName = eq.Name?.text; } catch { }
+                }
+            }
+        }
+        catch { }
+
+        string announcement = "Pack selection.";
+        if (IsUsefulLabel(equippedName))
+            announcement += $" Current pack: {equippedName}.";
+
+        ScreenReader.Instance.Say(announcement);
+
+        _log?.LogInfo($"PackShop arena scan: {packsGroup.Elements.Count} packs, {optionsGroup.Elements.Count} options");
+    }
+
+    private void AddPackShopOption(FocusGroup group, Spacewood.Unity.UI.ButtonBase? button, string fallbackLabel, ref int index)
+    {
+        if (button == null) return;
+        try { if (!button.GetInteractable()) return; } catch { return; }
+
+        string? label = null;
+        try { label = button.Label?.text; } catch { }
+        if (!IsUsefulLabel(label))
+        {
+            try { label = button.GetTitle(); } catch { }
+        }
+        if (!IsUsefulLabel(label)) label = fallbackLabel;
+
+        var capturedBtn = button;
+        var capturedLabel = label;
+        group.Elements.Add(new FocusElement(label!, index++)
+        {
+            Type = "button",
+            OnActivate = () =>
+            {
+                try
+                {
+                    _log?.LogInfo($"Activating: {capturedLabel}");
+                    capturedBtn.Click();
+                }
+                catch (System.Exception ex) { _log?.LogError($"Option click error: {ex}"); }
+            }
+        });
+    }
+
+    /// <summary>Specialized scan for PackShop in store/browse mode (accessed via Pets button).
+    /// Shows each pack as a single entry with Preview action for owned packs,
+    /// Buy for unowned. Filters out DeckViewer ghost buttons.</summary>
+    private void ScanPackShopStoreMode(Spacewood.Unity.PackShop packShop)
+    {
+        var group = new FocusGroup("Packs");
+
+        try
+        {
+            var products = packShop.Products;
+            if (products != null)
+            {
+                for (int i = 0; i < products.Count; i++)
+                {
+                    var product = products[i];
+                    if (product == null) continue;
+                    try { if (product.gameObject != null && !product.gameObject.activeInHierarchy) continue; } catch { continue; }
+
+                    // Get pack name from ProductTemplate
+                    string? name = null;
+                    try { name = product.ProductTemplate?.Name; } catch { }
+                    if (!IsUsefulLabel(name))
+                    {
+                        try { name = product.Name?.text; } catch { }
+                    }
+                    if (string.IsNullOrWhiteSpace(name))
+                        name = $"Pack {i + 1}";
+
+                    bool isOwned = false;
+                    try { isOwned = product.IsOwned; } catch { }
+
+                    // Build label: "Pack name, Preview" or "Pack name, Buy, $X.XX"
+                    string label = name!;
+                    if (isOwned)
+                    {
+                        label += ", Preview";
+                    }
+                    else
+                    {
+                        string? price = null;
+                        try { price = product.Price?.text; } catch { }
+                        if (IsUsefulLabel(price))
+                            label += $", {price}";
+                        else
+                            label += ", Buy";
+                    }
+
+                    var capturedProduct = product;
+                    var capturedName = name;
+                    var capturedOwned = isOwned;
+                    var element = new FocusElement(label, i)
+                    {
+                        Type = "button",
+                        Tag = capturedProduct,
+                        OnActivate = () =>
+                        {
+                            try
+                            {
+                                if (capturedOwned)
+                                {
+                                    // Open preview — click the PreviewButton if available, else main Button
+                                    _log?.LogInfo($"Previewing pack: {capturedName}");
+                                    var previewBtn = capturedProduct.PreviewButton;
+                                    if (previewBtn != null)
+                                        previewBtn.Click();
+                                    else
+                                        capturedProduct.Button?.Click();
+                                }
+                                else
+                                {
+                                    _log?.LogInfo($"Buying pack: {capturedName}");
+                                    capturedProduct.Button?.Click();
+                                }
+                            }
+                            catch (System.Exception ex)
+                            {
+                                _log?.LogError($"Pack action error: {ex}");
+                            }
+                        }
+                    };
+
+                    // Add description
+                    try
+                    {
+                        string? desc = capturedProduct.ProductTemplate?.Description;
+                        if (!string.IsNullOrWhiteSpace(desc))
+                            element.Detail = desc;
+                    }
+                    catch { }
+
+                    group.Elements.Add(element);
+                }
+            }
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"PackShop store scan error: {ex}");
+        }
+
+        // Add the Create Custom Pack button if present
+        try
+        {
+            var createBtn = packShop.CreateCustomButton;
+            if (createBtn != null)
+            {
+                try { if (!createBtn.GetInteractable()) createBtn = null; } catch { createBtn = null; }
+            }
+            if (createBtn != null)
+            {
+                string? createLabel = null;
+                try { createLabel = createBtn.Label?.text; } catch { }
+                if (!IsUsefulLabel(createLabel)) createLabel = "Create custom pack";
+
+                var capturedBtn = createBtn;
+                group.Elements.Add(new FocusElement(createLabel!, group.Elements.Count)
+                {
+                    Type = "button",
+                    OnActivate = () =>
+                    {
+                        try { capturedBtn.Click(); }
+                        catch (System.Exception ex) { _log?.LogError($"Create pack click error: {ex}"); }
+                    }
+                });
+            }
+        }
+        catch { }
+
+        if (group.Elements.Count == 0)
+        {
+            _log?.LogDebug("PackShop store scan: no elements found");
+            return;
+        }
+
+        FocusManager.Instance?.SetGroups(new List<FocusGroup> { group });
+        ScreenReader.Instance.Say("Pets.");
+        _log?.LogInfo($"PackShop store scan: {group.Elements.Count} packs");
+    }
+
+    // ── DeckViewer (pack preview) polling ─────────────────────────────
+
+    private void PollForDeckViewer()
+    {
+        try
+        {
+            if (_cachedDeckViewer == null)
+            {
+                _cachedDeckViewer = Object.FindObjectOfType<Spacewood.Unity.MonoBehaviours.Build.DeckViewer>();
+                if (_cachedDeckViewer == null) return;
+            }
+
+            bool isActive = false;
+            try
+            {
+                isActive = _cachedDeckViewer.gameObject != null
+                    && _cachedDeckViewer.gameObject.activeInHierarchy;
+            }
+            catch { _cachedDeckViewer = null; return; }
+
+            if (isActive && !_deckViewerWasActive)
+            {
+                _deckViewerWasActive = true;
+                OnDeckViewerOpened();
+            }
+            else if (!isActive && _deckViewerWasActive)
+            {
+                _deckViewerWasActive = false;
+                OnDeckViewerClosed();
+            }
+        }
+        catch { }
+    }
+
+    private void OnDeckViewerOpened()
+    {
+        IsDialogOpen = true;
+        _log?.LogInfo("DeckViewer (pack preview) opened");
+
+        var dv = _cachedDeckViewer!;
+        var group = new FocusGroup("Preview");
+
+        // Read tier rows and their items
+        try
+        {
+            var rows = dv.ItemRows;
+            if (rows != null)
+            {
+                int idx = 0;
+                for (int r = 0; r < rows.Count; r++)
+                {
+                    var row = rows[r];
+                    if (row == null) continue;
+                    try { if (!row.gameObject.activeInHierarchy) continue; } catch { continue; }
+
+                    // Check if this tier is concealed (locked)
+                    bool concealed = false;
+                    try { concealed = row.Conceal != null && row.Conceal.gameObject.activeSelf; } catch { }
+
+                    // Tier/Turn label
+                    string? tierLabel = null;
+                    try { tierLabel = row.Text?.text; } catch { }
+                    if (!IsUsefulLabel(tierLabel)) tierLabel = $"Tier {r + 1}";
+
+                    if (concealed)
+                    {
+                        group.Elements.Add(new FocusElement($"{tierLabel}, locked", idx++) { Type = "text" });
+                        continue;
+                    }
+
+                    // Scan pets in this row
+                    try
+                    {
+                        var petContainer = row.PetContainer;
+                        if (petContainer != null)
+                            ScanDeckViewerContainer(petContainer, tierLabel!, "Pet", group, ref idx);
+                    }
+                    catch { }
+
+                    // Scan food in this row
+                    try
+                    {
+                        var foodContainer = row.FoodContainer;
+                        if (foodContainer != null)
+                            ScanDeckViewerContainer(foodContainer, tierLabel!, "Food", group, ref idx);
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"DeckViewer row scan error: {ex}");
+        }
+
+        // Add Close button
+        try
+        {
+            var closeBtn = dv.CloseButton;
+            if (closeBtn != null)
+            {
+                var capturedBtn = closeBtn;
+                group.Elements.Add(new FocusElement("Close", group.Elements.Count)
+                {
+                    Type = "button",
+                    OnActivate = () =>
+                    {
+                        try { capturedBtn.Click(); }
+                        catch (System.Exception ex) { _log?.LogError($"Close preview error: {ex}"); }
+                    }
+                });
+            }
+        }
+        catch { }
+
+        if (group.Elements.Count == 0)
+        {
+            _log?.LogDebug("DeckViewer scan: no items found");
+            return;
+        }
+
+        FocusManager.Instance?.SetGroups(new List<FocusGroup> { group });
+        _log?.LogInfo($"DeckViewer scan: {group.Elements.Count} items");
+    }
+
+    private void OnDeckViewerClosed()
+    {
+        _log?.LogInfo("DeckViewer closed");
+        IsDialogOpen = false;
+
+        // Rescan the underlying page
+        RequestRescan();
+    }
+
+    /// <summary>Try to resolve the name of a DeckViewerItem from its button tooltip,
+    /// button label, or icon sprite name.</summary>
+    /// <summary>Scans DeckViewerItems in a container (pet or food), filtering out
+    /// non-interactable items (achievement/perk placeholders).</summary>
+    private void ScanDeckViewerContainer(
+        RectTransform container, string tierLabel, string category,
+        FocusGroup group, ref int idx)
+    {
+        var items = container.GetComponentsInChildren<Spacewood.Unity.MonoBehaviours.Build.DeckViewerItem>(false);
+        if (items == null) return;
+
+        foreach (var item in items)
+        {
+            if (item == null) continue;
+            try { if (!item.gameObject.activeInHierarchy) continue; } catch { continue; }
+
+            // Skip items with no interactable button — these are achievement/perk placeholders
+            bool hasButton = false;
+            try { hasButton = item.Button != null && item.Button.GetInteractable(); } catch { }
+            if (!hasButton) continue;
+
+            string? itemName = ResolveViewerItemName(item, category);
+            group.Elements.Add(new FocusElement($"{tierLabel}: {itemName}", idx++)
+            {
+                Type = "text",
+                Tag = item
+            });
+        }
+    }
+
+    private string ResolveViewerItemName(Spacewood.Unity.MonoBehaviours.Build.DeckViewerItem item, string fallback)
+    {
+        // Try button tooltip text
+        try
+        {
+            var tooltip = item.Button?.Tooltip;
+            if (tooltip != null)
+            {
+                string? text = tooltip.TextMesh?.text;
+                if (IsUsefulLabel(text))
+                    return StripRichText(text!);
+            }
+        }
+        catch { }
+
+        // Try button label text
+        try
+        {
+            string? label = item.Button?.Label?.text;
+            if (IsUsefulLabel(label))
+                return StripRichText(label!);
+        }
+        catch { }
+
+        // Try button GetTitle
+        try
+        {
+            string? title = item.Button?.GetTitle();
+            if (IsUsefulLabel(title))
+                return StripRichText(title!);
+        }
+        catch { }
+
+        // Try icon sprite name (often contains pet/spell enum name)
+        try
+        {
+            string? spriteName = item.Icon?.sprite?.name;
+            if (IsUsefulLabel(spriteName))
+            {
+                string clean = spriteName!;
+                // Strip resolution suffixes like _2x, _1x
+                if (clean.EndsWith("_2x") || clean.EndsWith("_1x"))
+                    clean = clean.Substring(0, clean.Length - 3);
+                // Clean up common prefixes
+                if (clean.StartsWith("pet-")) clean = clean.Substring(4);
+                if (clean.StartsWith("spell-")) clean = clean.Substring(6);
+                if (clean.StartsWith("food-")) clean = clean.Substring(5);
+                if (clean.StartsWith("perk-")) clean = clean.Substring(5);
+                // Convert underscores to spaces and capitalize
+                clean = clean.Replace('_', ' ');
+                if (clean.Length > 0)
+                    clean = char.ToUpper(clean[0]) + clean.Substring(1);
+                return clean;
+            }
+        }
+        catch { }
+
+        // Try GameObject name
+        try
+        {
+            string? goName = item.gameObject?.name;
+            if (IsUsefulLabel(goName) && goName != "DeckViewerItem")
+                return goName!;
+        }
+        catch { }
+
+        return fallback;
+    }
+
+
     public void GoBack()
     {
         if (IsEditing)

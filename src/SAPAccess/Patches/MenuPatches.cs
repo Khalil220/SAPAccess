@@ -134,4 +134,56 @@ public static class MenuPatches
             Log.LogError($"Menu.StartForgotPassword patch error: {ex}");
         }
     }
+
+    // ── Picker Dialog Patches ────────────────────────────────────────
+
+    /// <summary>Postfix on Picker.Open — detects choice/confirmation dialogs.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.UI.Picker), nameof(Spacewood.Unity.UI.Picker.Open))]
+    [HarmonyPostfix]
+    public static void Picker_Open_Postfix()
+    {
+        try
+        {
+            Log.LogInfo("Picker dialog opened");
+            MenuNavigator.Instance?.OnPickerOpened();
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"Picker.Open patch error: {ex}");
+        }
+    }
+
+    /// <summary>Postfix on Picker.Pick — detects when a choice is made.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.UI.Picker), nameof(Spacewood.Unity.UI.Picker.Pick))]
+    [HarmonyPostfix]
+    public static void Picker_Pick_Postfix(Spacewood.Unity.UI.PickerItem item)
+    {
+        try
+        {
+            string? label = null;
+            try { label = item?.GetLabel(); } catch { }
+            Log.LogInfo($"Picker choice: {label ?? "unknown"}");
+            MenuNavigator.Instance?.OnPickerClosed(label);
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"Picker.Pick patch error: {ex}");
+        }
+    }
+
+    /// <summary>Postfix on Picker.Close (private) — detects dialog dismissal (e.g. backdrop click).</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.UI.Picker), "Close")]
+    [HarmonyPostfix]
+    public static void Picker_Close_Postfix()
+    {
+        try
+        {
+            Log.LogInfo("Picker dialog closed");
+            MenuNavigator.Instance?.OnPickerClosed();
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"Picker.Close patch error: {ex}");
+        }
+    }
 }

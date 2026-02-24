@@ -38,15 +38,18 @@ public static class HangarPatches
         }
     }
 
-    /// <summary>Postfix on HangarMain.EndTurnAsync — detects turn end / battle start.</summary>
+    /// <summary>Postfix on HangarMain.EndTurnAsync — logs the call.
+    /// NOTE: Do NOT set phase to Battle here — this postfix fires immediately
+    /// when the async method is invoked, before the server confirms. If the server
+    /// rejects the call (e.g. "Can't end turn"), a phantom battle cycle occurs.
+    /// BattlePatches.PlayBattle_Prefix sets the phase when the actual battle starts.</summary>
     [HarmonyPatch(typeof(Spacewood.Unity.MonoBehaviours.Build.HangarMain), nameof(Spacewood.Unity.MonoBehaviours.Build.HangarMain.EndTurnAsync))]
     [HarmonyPostfix]
     public static void HangarMain_EndTurnAsync_Postfix()
     {
         try
         {
-            Log.LogInfo("Turn ended, battle starting");
-            GamePhaseTracker.Instance.CurrentPhase = GamePhase.Battle;
+            Log.LogInfo("EndTurnAsync called");
         }
         catch (System.Exception ex)
         {
@@ -54,19 +57,15 @@ public static class HangarPatches
         }
     }
 
-    /// <summary>Postfix on HangarMain.RollShopAsync — detects shop roll.</summary>
+    /// <summary>Postfix on HangarMain.RollShopAsync — detects shop roll.
+    /// Note: gold announcement is deferred to RefreshShopState (board data is stale here).</summary>
     [HarmonyPatch(typeof(Spacewood.Unity.MonoBehaviours.Build.HangarMain), nameof(Spacewood.Unity.MonoBehaviours.Build.HangarMain.RollShopAsync))]
     [HarmonyPostfix]
     public static void HangarMain_RollShopAsync_Postfix(Spacewood.Unity.MonoBehaviours.Build.HangarMain __instance)
     {
         try
         {
-            var board = __instance.BuildModel?.Board;
-            if (board != null)
-            {
-                ShopStateReader.Instance.ReadFromBoard(board);
-            }
-            ShopAnnouncer.Instance?.OnShopRolled();
+            Log.LogInfo("Shop rolled");
         }
         catch (System.Exception ex)
         {

@@ -21,9 +21,25 @@ public class ScreenReader
     }
 
     /// <summary>
-    /// Interrupts current speech and speaks the given text immediately.
+    /// Speaks the given text, queuing after any in-progress speech.
     /// </summary>
     public void Say(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+
+        if (NvdaClient.IsRunning())
+        {
+            NvdaClient.Speak(text);
+        }
+
+        _log.LogInfo($"[SAY] {text}");
+    }
+
+    /// <summary>
+    /// Interrupts current speech and speaks the given text immediately.
+    /// Use for navigation focus changes where the user expects instant feedback.
+    /// </summary>
+    public void Interrupt(string text)
     {
         if (string.IsNullOrEmpty(text)) return;
 

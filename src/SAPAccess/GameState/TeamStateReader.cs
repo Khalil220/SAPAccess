@@ -42,15 +42,12 @@ public class TeamStateReader
             }
 
             string? heldItem = null;
-            if (minion.Perk.HasValue)
+            try
             {
-                try
-                {
-                    var perkEnum = minion.Perk.Value;
-                    heldItem = perkEnum.ToString();
-                }
-                catch { }
+                if (minion.Perk.HasValue)
+                    heldItem = minion.Perk.Value.ToString();
             }
+            catch { /* IL2CPP Nullable<T> throws when perk is null */ }
 
             Slots.Add(new TeamSlot
             {
