@@ -95,6 +95,14 @@ public class KeyboardHandler : MonoBehaviour
                 else
                     MenuNavigator.Instance?.DismissPostGameScreen();
             }
+            // If pet placement is active and a team position is focused, place the pet
+            else if (inShop && MenuNavigator.Instance?.HasPendingPet == true
+                && _focus?.CurrentGroup?.Name == "Team"
+                && element?.Tag is string placeTag && placeTag.StartsWith("place:"))
+            {
+                if (int.TryParse(placeTag.Substring(6), out int position))
+                    MenuNavigator.Instance.PlacePendingPet(position, element.Label);
+            }
             // If food targeting is active and a team pet is focused, apply food to it
             else if (inShop && MenuNavigator.Instance?.HasPendingFood == true
                 && _focus?.CurrentGroup?.Name == "Team"
@@ -161,6 +169,10 @@ public class KeyboardHandler : MonoBehaviour
             {
                 MenuNavigator.Instance.DismissCurrentDialog();
             }
+            else if (inShop && MenuNavigator.Instance?.HasPendingPet == true)
+            {
+                MenuNavigator.Instance.CancelPendingPet();
+            }
             else if (inShop && MenuNavigator.Instance?.HasPendingFood == true)
             {
                 MenuNavigator.Instance.CancelPendingFood();
@@ -215,7 +227,7 @@ public class KeyboardHandler : MonoBehaviour
                 "Tab: switch between shop and team. " +
                 "G: focus shop. " +
                 "B: focus team. " +
-                "Enter or Space: buy pet, or apply food to target. " +
+                "Enter or Space: buy pet and choose position, or apply food to target. " +
                 "R: roll shop. " +
                 "F: freeze or unfreeze. " +
                 "E: end turn. " +
@@ -225,7 +237,7 @@ public class KeyboardHandler : MonoBehaviour
                 "T: team summary. " +
                 "S: shop summary. " +
                 "A: gold, lives, and turn. " +
-                "Escape: cancel food targeting or speech. " +
+                "Escape: cancel placement, food targeting, or speech. " +
                 "F1: this help.");
         }
         else

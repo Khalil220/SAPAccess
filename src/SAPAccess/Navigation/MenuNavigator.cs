@@ -66,9 +66,17 @@ public class MenuNavigator : MonoBehaviour
     private Spacewood.Unity.TallyArenaMenu? _cachedTallyMenu;
     private bool _tallyMenuWasActive;
 
+    // IconAlert (tier rank-up / turn milestone) polling state
+    private Spacewood.Unity.IconAlert? _cachedIconAlert;
+    private bool _iconAlertWasOpen;
+
     // Pending food targeting: user selected a food item, now needs to pick a team pet
     private Spacewood.Core.Models.SpellModel? _pendingFood;
     private string? _pendingFoodName;
+
+    // Pending pet placement: user selected a shop pet, now needs to pick a team position
+    private Spacewood.Core.Models.MinionModel? _pendingPet;
+    private string? _pendingPetName;
 
     // Fallback game-start detection (HangarPatches may not fire for async methods)
     private float _hangarCheckTimer;
@@ -159,6 +167,8 @@ public class MenuNavigator : MonoBehaviour
                 _tallyMenuWasActive = false;
                 _cachedDeckViewer = null;
                 _deckViewerWasActive = false;
+                _cachedIconAlert = null;
+                _iconAlertWasOpen = false;
                 IsDialogOpen = false;
             }
 
@@ -173,6 +183,7 @@ public class MenuNavigator : MonoBehaviour
             PollForPicker();
             PollForDock();
             PollForDeckViewer();
+            PollForIconAlert();
         }
 
         // Poll for TallyArena and post-game screens during battle phase
@@ -240,9 +251,9 @@ public class MenuNavigator : MonoBehaviour
                             _postBattleDelay = 1.5f;
                             _log?.LogInfo("Post-battle setup deferred (1.5s delay)");
                         }
-                        // If the Dock (team naming) screen is active, defer shop setup
-                        // until it closes — don't overwrite the naming focus groups
-                        else if (!_dockWasActive)
+                        // If a dialog (IconAlert, Dock, etc.) is active, defer shop setup
+                        // until it closes — don't overwrite the dialog's focus groups
+                        else if (!_dockWasActive && !IsDialogOpen)
                         {
                             var board = hangar.BuildModel?.Board;
                             if (board != null)
@@ -267,13 +278,21 @@ public class MenuNavigator : MonoBehaviour
         }
 
         // Post-battle delayed setup (wait for server to populate new turn data)
+        // Defer if a dialog (IconAlert) is open — it will trigger shop refresh on close
         if (_needsPostBattleSetup && phase == GamePhase.Shop)
         {
             _postBattleDelay -= Time.deltaTime;
             if (_postBattleDelay <= 0f)
             {
-                _needsPostBattleSetup = false;
-                PerformPostBattleSetup();
+                if (IsDialogOpen)
+                {
+                    _log?.LogInfo("Post-battle setup deferred — dialog is open");
+                }
+                else
+                {
+                    _needsPostBattleSetup = false;
+                    PerformPostBattleSetup();
+                }
             }
         }
 
@@ -289,13 +308,21 @@ public class MenuNavigator : MonoBehaviour
         }
 
         // Shop-phase refresh (after roll, buy, sell, freeze)
+        // Defer if a dialog (IconAlert) is open — it will trigger shop refresh on close
         if (_needsShopRefresh && phase == GamePhase.Shop)
         {
             _shopRefreshDelay -= Time.deltaTime;
             if (_shopRefreshDelay <= 0f)
             {
-                _needsShopRefresh = false;
-                RefreshShopState();
+                if (IsDialogOpen)
+                {
+                    _log?.LogInfo("Shop refresh deferred — dialog is open");
+                }
+                else
+                {
+                    _needsShopRefresh = false;
+                    RefreshShopState();
+                }
             }
         }
 
@@ -498,11 +525,26 @@ public class MenuNavigator : MonoBehaviour
                     if (!string.IsNullOrWhiteSpace(spellAbility))
                         rows.Add(StripRichText(spellAbility!));
 
-                    // Row 3: Perk fine print (detailed effect, e.g. "Takes 2 less damage")
-                    string? finePrint = null;
-                    try { finePrint = Spacewood.Unity.Extensions.SpellModelExtensions.GetFinePrintLocalized(spell, board); } catch { }
-                    if (!string.IsNullOrWhiteSpace(finePrint))
-                        rows.Add(StripRichText(finePrint!));
+                    // Row 3: Perk effect (for perk-granting foods like Garlic, Honey, Meat Bone, etc.)
+                    // Match SpellEnum name to Perk enum name — they match for perk-granting foods.
+                    try
+                    {
+                        string spellEnumName = spell.Enum.ToString();
+                        if (System.Enum.TryParse<Spacewood.Core.Enums.Perk>(spellEnumName, out var perkEnum))
+                        {
+                            var perkTemplate = Spacewood.Core.Enums.PerkConstants.GetPerk(perkEnum);
+                            if (perkTemplate != null)
+                            {
+                                string? perkName = perkTemplate.Name;
+                                string? perkAbout = perkTemplate.GetAbout();
+                                if (!string.IsNullOrWhiteSpace(perkName) && !string.IsNullOrWhiteSpace(perkAbout))
+                                    rows.Add($"Perk: {StripRichText(perkName!)}. {StripRichText(perkAbout!)}");
+                                else if (!string.IsNullOrWhiteSpace(perkName))
+                                    rows.Add($"Perk: {StripRichText(perkName!)}");
+                            }
+                        }
+                    }
+                    catch { }
 
                     var capturedSpell = spell;
                     var capturedHangar = hangar;
@@ -603,6 +645,53 @@ public class MenuNavigator : MonoBehaviour
         }
         catch (System.Exception ex) { _log?.LogError($"Team scan error: {ex}"); }
 
+        // When in pet placement mode, replace team elements with positional slot choices
+        if (_pendingPet != null && teamGroup.Elements.Count > 0)
+        {
+            // Collect pet names in order before replacing elements
+            var petNames = new List<string>();
+            var petPoints = new List<int>();
+            for (int i = 0; i < teamGroup.Elements.Count; i++)
+            {
+                petNames.Add(teamGroup.Elements[i].Label);
+                if (teamGroup.Elements[i].Tag is Spacewood.Core.Models.MinionModel m)
+                    petPoints.Add(m.Point.x);
+                else
+                    petPoints.Add(i);
+            }
+
+            teamGroup.Elements.Clear();
+            int count = petNames.Count;
+
+            // Front: before first pet
+            var frontElement = new FocusElement($"Front, before {petNames[0]}", 0)
+            {
+                Type = "button",
+                Tag = $"place:{petPoints[0]}"
+            };
+            teamGroup.Elements.Add(frontElement);
+
+            // Between each pair of adjacent pets
+            for (int i = 0; i < count - 1; i++)
+            {
+                var betweenElement = new FocusElement($"Between {petNames[i]} and {petNames[i + 1]}", i + 1)
+                {
+                    Type = "button",
+                    Tag = $"place:{petPoints[i + 1]}"
+                };
+                teamGroup.Elements.Add(betweenElement);
+            }
+
+            // Back: after last pet
+            int backPosition = petPoints[count - 1] + 1;
+            var backElement = new FocusElement($"Back, after {petNames[count - 1]}", count)
+            {
+                Type = "button",
+                Tag = $"place:{backPosition}"
+            };
+            teamGroup.Elements.Add(backElement);
+        }
+
         if (teamGroup.Elements.Count > 0)
             groups.Add(teamGroup);
 
@@ -655,12 +744,26 @@ public class MenuNavigator : MonoBehaviour
                 return;
             }
 
-            var targetPoint = new Spacewood.Core.System.Point(teamSize, 0);
-            hangar.PlayMinionAsync(minion, targetPoint, null);
+            // Empty team: place directly at position 0
+            if (teamSize == 0)
+            {
+                var targetPoint = new Spacewood.Core.System.Point(0, 0);
+                hangar.PlayMinionAsync(minion, targetPoint, null);
+                ScreenReader.Instance.Say($"Bought {name}.");
+                _log?.LogInfo($"Buy pet: {name} at position 0 (empty team)");
+                ScheduleShopRefresh();
+                return;
+            }
 
-            ScreenReader.Instance.Say($"Bought {name}.");
-            _log?.LogInfo($"Buy pet: {name} at position {teamSize}");
-            ScheduleShopRefresh();
+            // Enter placement mode — user picks a team position
+            _pendingPet = minion;
+            _pendingPetName = name;
+            ScreenReader.Instance.Say($"Place {name}. Choose a team position, then press Enter.");
+            _log?.LogInfo($"Pet placement started: {name}");
+
+            // Rebuild focus groups so Team includes "End of team" element, then focus Team
+            BuildShopFocusGroups(hangar, silent: false);
+            FocusManager.Instance?.FocusGroupByName("Team");
         }
         catch (System.Exception ex)
         {
@@ -746,6 +849,54 @@ public class MenuNavigator : MonoBehaviour
 
     /// <summary>Whether there is a pending food item waiting for a target pet.</summary>
     public bool HasPendingFood => _pendingFood != null;
+
+    /// <summary>Whether there is a pending pet waiting for a placement position.</summary>
+    public bool HasPendingPet => _pendingPet != null;
+
+    /// <summary>Places the pending pet at the specified team position.</summary>
+    public void PlacePendingPet(int position, string positionLabel)
+    {
+        if (_pendingPet == null || _cachedHangar == null)
+        {
+            ScreenReader.Instance.Say("No pet selected.");
+            return;
+        }
+
+        try
+        {
+            var pet = _pendingPet;
+            var petName = _pendingPetName ?? "pet";
+            _pendingPet = null;
+            _pendingPetName = null;
+
+            var targetPoint = new Spacewood.Core.System.Point(position, 0);
+            _cachedHangar.PlayMinionAsync(pet, targetPoint, null);
+
+            ScreenReader.Instance.Say($"Placed {petName}. {positionLabel}.");
+
+            _log?.LogInfo($"Pet placed: {petName} at position {position}");
+            ScheduleShopRefresh();
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"Place pet error: {ex}");
+            ScreenReader.Instance.Say("Placement failed.");
+            _pendingPet = null;
+            _pendingPetName = null;
+        }
+    }
+
+    /// <summary>Cancels the pending pet placement mode.</summary>
+    public void CancelPendingPet()
+    {
+        if (_pendingPet != null)
+        {
+            _pendingPet = null;
+            _pendingPetName = null;
+            ScreenReader.Instance.Say("Placement cancelled.");
+            ScheduleShopRefresh();
+        }
+    }
 
     /// <summary>Merges the focused pet onto a matching pet.
     /// Shop pet focused → buys and merges onto a matching team pet (PlayMinionAsync).
@@ -1021,15 +1172,50 @@ public class MenuNavigator : MonoBehaviour
                 return;
             }
 
-            // Use the game's OrderMinion to properly update the model + hash
+            // Use the game's built-in OrderMinion through the state machine
+            // This handles both the local board update and server sync
             var minionA = teamPets[currentIdx].model;
             var pointB = teamPets[targetIdx].model.Point;
 
-            Spacewood.Core.Actions.Board.BoardExtensions.OrderMinion(board, minionA.Id, pointB);
-            _log?.LogInfo($"OrderMinion: {teamPets[currentIdx].name} to Point({pointB.x},{pointB.y})");
+            // Find the target Space object from the MinionArmy grid
+            var minionArmy = _cachedHangar.MinionArmy;
+            if (minionArmy?.Spaces?.Items == null)
+            {
+                _log?.LogError("MinionArmy.Spaces not available for reorder");
+                ScreenReader.Instance.Say("Shift failed.");
+                return;
+            }
 
-            // Visual update
-            try { _cachedHangar.BoardView?.OrderMinion(minionA.Id, pointB, 0.3f); } catch { }
+            Spacewood.Unity.Views.Space? targetSpace = null;
+            for (int i = 0; i < minionArmy.Spaces.Items.Count; i++)
+            {
+                var space = minionArmy.Spaces.Items[i];
+                if (space != null && space.Point.x == pointB.x && space.Point.y == pointB.y)
+                {
+                    targetSpace = space;
+                    break;
+                }
+            }
+
+            if (targetSpace == null)
+            {
+                _log?.LogError($"No Space found at Point({pointB.x},{pointB.y})");
+                ScreenReader.Instance.Say("Shift failed.");
+                return;
+            }
+
+            // Call the game's OrderMinion through the hangar state machine
+            var stateMachine = _cachedHangar.StateMachine;
+            var state = stateMachine?.State;
+            if (state == null)
+            {
+                _log?.LogError("HangarStateMachine.State is null");
+                ScreenReader.Instance.Say("Shift failed.");
+                return;
+            }
+
+            bool result = state.OrderMinion(minionA, targetSpace, false);
+            _log?.LogInfo($"OrderMinion via state machine: {teamPets[currentIdx].name} to Point({pointB.x},{pointB.y}), result={result}");
 
             // Build announcement based on new position
             // After swap: our pet is at targetIdx, displaced pet is at currentIdx
@@ -1095,7 +1281,11 @@ public class MenuNavigator : MonoBehaviour
                 AnnounceBattleResult(_cachedHangar);
             }
 
-            if (!_dockWasActive)
+            if (IsDialogOpen)
+            {
+                _log?.LogInfo("Dialog is open — deferring shop setup after battle");
+            }
+            else if (!_dockWasActive)
             {
                 var board = _cachedHangar.BuildModel?.Board;
                 if (board != null)
@@ -1318,6 +1508,117 @@ public class MenuNavigator : MonoBehaviour
         }
 
         _log?.LogInfo("Alert dialog closed");
+    }
+
+    // ── IconAlert (Tier Rank-Up / Turn Milestone) Polling ────────────
+
+    /// <summary>Polls each frame for IconAlert visibility (tier rank-up overlays).</summary>
+    private void PollForIconAlert()
+    {
+        try
+        {
+            // Get the IconAlert from the cached HangarMain if available, otherwise find it
+            if (_cachedIconAlert == null)
+            {
+                if (_cachedHangar != null)
+                {
+                    try { _cachedIconAlert = _cachedHangar.iconAlert; } catch { }
+                }
+                if (_cachedIconAlert == null)
+                    _cachedIconAlert = Object.FindObjectOfType<Spacewood.Unity.IconAlert>();
+                if (_cachedIconAlert == null) return;
+            }
+
+            bool isOpen = false;
+            try
+            {
+                // IconAlert.gameObject is disabled by default, enabled when Open() is called
+                isOpen = _cachedIconAlert.gameObject.activeSelf;
+            }
+            catch { }
+
+            if (isOpen && !_iconAlertWasOpen)
+            {
+                _iconAlertWasOpen = true;
+                OnIconAlertOpened();
+            }
+            else if (!isOpen && _iconAlertWasOpen)
+            {
+                _iconAlertWasOpen = false;
+                OnIconAlertClosed();
+            }
+        }
+        catch { }
+    }
+
+    private void OnIconAlertOpened()
+    {
+        IsDialogOpen = true;
+
+        // Save focus position for restore after dismiss
+        _restoreGroupName = FocusManager.Instance?.CurrentGroup?.Name;
+        _restoreElementIndex = FocusManager.Instance?.CurrentElementIndex ?? 0;
+
+        // Read the tier rank-up text
+        string above = "";
+        string below = "";
+        try { above = _cachedIconAlert!.TextMeshAbove?.text ?? ""; } catch { }
+        try { below = _cachedIconAlert!.TextMeshBelow?.text ?? ""; } catch { }
+
+        above = StripRichText(above).Trim();
+        below = StripRichText(below).Trim();
+
+        // Build announcement
+        string announcement = "";
+        if (!string.IsNullOrEmpty(above))
+            announcement = above;
+        if (!string.IsNullOrEmpty(below))
+            announcement += (announcement.Length > 0 ? ". " : "") + below;
+        if (string.IsNullOrEmpty(announcement))
+            announcement = "Tier rank up";
+
+        // Set up a simple focus group with a confirm button
+        var group = new FocusGroup("Dialog");
+        var confirmElement = new FocusElement("Continue", 0)
+        {
+            Type = "button",
+            OnActivate = () => DismissIconAlert()
+        };
+        group.Elements.Add(confirmElement);
+
+        ScreenReader.Instance.Say($"{announcement}. Press Enter to continue.");
+        FocusManager.Instance?.SetGroups(new List<FocusGroup> { group });
+        _log?.LogInfo($"IconAlert opened: {announcement}");
+    }
+
+    private void OnIconAlertClosed()
+    {
+        if (!IsDialogOpen) return;
+        IsDialogOpen = false;
+
+        var phase = GamePhaseTracker.Instance.CurrentPhase;
+        if (phase == GamePhase.Shop && _cachedHangar != null)
+            ScheduleShopRefresh();
+        else
+            FocusManager.Instance?.Clear();
+
+        _log?.LogInfo("IconAlert closed");
+    }
+
+    /// <summary>Dismisses the IconAlert by calling its Confirm method.</summary>
+    public void DismissIconAlert()
+    {
+        if (_cachedIconAlert == null) return;
+
+        try
+        {
+            _cachedIconAlert.Confirm();
+            _log?.LogInfo("IconAlert dismissed via Confirm()");
+        }
+        catch (System.Exception ex)
+        {
+            _log?.LogError($"IconAlert dismiss error: {ex}");
+        }
     }
 
     // ── Picker Dialog Polling ────────────────────────────────────────
@@ -1548,46 +1849,64 @@ public class MenuNavigator : MonoBehaviour
     {
         _log?.LogInfo("TallyArena reading result...");
 
-        // Determine result from which status container is active
+        var tally = _cachedTally!;
+
+        // Primary: read the Outcome enum directly from the TallyArena object
+        // BattleOutcome: Incomplete=0, PlayerWon=1, EnemyWon=2, Draw=3, TimeoutDraw=4
         string result = "";
         try
         {
-            var tally = _cachedTally!;
-            if (tally.StatusVictoryContainer != null && tally.StatusVictoryContainer.gameObject.activeSelf)
-                result = "Victory";
-            else if (tally.StatusVictoryFinaleContainer != null && tally.StatusVictoryFinaleContainer.gameObject.activeSelf)
-                result = "Victory";
-            else if (tally.StatusLossContainer != null && tally.StatusLossContainer.gameObject.activeSelf)
-                result = "Defeat";
-            else if (tally.StatusLossFinaleContainer != null && tally.StatusLossFinaleContainer.gameObject.activeSelf)
-                result = "Defeat";
-            else if (tally.StatusDrawContainer != null && tally.StatusDrawContainer.gameObject.activeSelf)
-                result = "Draw";
-            else if (tally.StatusDrawFinaleContainer != null && tally.StatusDrawFinaleContainer.gameObject.activeSelf)
-                result = "Draw";
+            int outcome = (int)tally.Outcome;
+            _log?.LogInfo($"TallyArena Outcome field: {outcome}");
+            result = outcome switch
+            {
+                1 => "Victory",
+                2 => "Defeat",
+                3 => "Draw",
+                4 => "Draw",
+                _ => ""
+            };
         }
-        catch { }
+        catch (System.Exception ex)
+        {
+            _log?.LogWarning($"Could not read TallyArena.Outcome: {ex.Message}");
+        }
 
-        // Fallback: read Status TextMeshProUGUI and look for keywords
+        // Fallback: check which status container is active in the hierarchy
         if (string.IsNullOrEmpty(result))
         {
             try
             {
-                string? statusText = _cachedTally!.Status?.text;
-                if (!string.IsNullOrWhiteSpace(statusText))
-                {
-                    string upper = statusText!.ToUpperInvariant();
-                    if (upper.Contains("VICTORY") || upper.Contains("WON"))
-                        result = "Victory";
-                    else if (upper.Contains("DEFEAT") || upper.Contains("LOSS") || upper.Contains("LOST"))
-                        result = "Defeat";
-                    else if (upper.Contains("DRAW"))
-                        result = "Draw";
-                    else
-                        result = StripRichText(statusText!).Split('\n')[0].Trim();
+                if (tally.StatusVictoryContainer != null && tally.StatusVictoryContainer.gameObject.activeInHierarchy)
+                    result = "Victory";
+                else if (tally.StatusVictoryFinaleContainer != null && tally.StatusVictoryFinaleContainer.gameObject.activeInHierarchy)
+                    result = "Victory";
+                else if (tally.StatusLossContainer != null && tally.StatusLossContainer.gameObject.activeInHierarchy)
+                    result = "Defeat";
+                else if (tally.StatusLossFinaleContainer != null && tally.StatusLossFinaleContainer.gameObject.activeInHierarchy)
+                    result = "Defeat";
+                else if (tally.StatusDrawContainer != null && tally.StatusDrawContainer.gameObject.activeInHierarchy)
+                    result = "Draw";
+                else if (tally.StatusDrawFinaleContainer != null && tally.StatusDrawFinaleContainer.gameObject.activeInHierarchy)
+                    result = "Draw";
+            }
+            catch { }
+        }
 
-                    _log?.LogInfo($"TallyArena Status.text: '{statusText}'");
-                }
+        // Last resort: compare lives/victories before and after
+        if (string.IsNullOrEmpty(result))
+        {
+            try
+            {
+                int newLives = ShopStateReader.Instance.Lives;
+                int newVictories = ShopStateReader.Instance.Victories;
+                if (newVictories > _preBattleVictories)
+                    result = "Victory";
+                else if (newLives < _preBattleLives)
+                    result = "Defeat";
+                else
+                    result = "Draw";
+                _log?.LogInfo($"TallyArena result via lives/victories comparison");
             }
             catch { }
         }
@@ -3452,6 +3771,17 @@ public class MenuNavigator : MonoBehaviour
                     _log?.LogInfo("DeckViewer dismissed via Escape");
                     return;
                 }
+            }
+        }
+        catch { }
+
+        // IconAlert (tier rank-up) — confirm to dismiss
+        try
+        {
+            if (_cachedIconAlert != null && _iconAlertWasOpen)
+            {
+                DismissIconAlert();
+                return;
             }
         }
         catch { }
