@@ -5,7 +5,7 @@ namespace SAPAccess.GameState;
 
 /// <summary>
 /// Reads the current state of a battle: events, outcome, and team health.
-/// Data is populated by Harmony patches on BoardController and BoardView.
+/// Data is populated by BattleAnnouncer's EventLog parsing during battle phase.
 /// </summary>
 public class BattleStateReader
 {
@@ -18,6 +18,15 @@ public class BattleStateReader
     public int EnemyPetsRemaining { get; set; }
     public int FriendlyPetsRemaining { get; set; }
 
+    /// <summary>Number of events queued this battle.</summary>
+    public int TotalQueued { get; private set; }
+
+    /// <summary>Number of events dequeued (announced) this battle.</summary>
+    public int TotalDequeued { get; private set; }
+
+    /// <summary>True when all queued events have been announced.</summary>
+    public bool AllEventsAnnounced => TotalQueued > 0 && TotalDequeued >= TotalQueued;
+
     private BattleStateReader()
     {
         _log = Logger.CreateLogSource("SAPAccess.Battle");
@@ -27,19 +36,24 @@ public class BattleStateReader
     public void QueueEvent(BattleEvent evt)
     {
         _eventQueue.Enqueue(evt);
+        TotalQueued++;
         _log.LogDebug($"Battle event: {evt.Type} - {evt.Description}");
     }
 
     /// <summary>Dequeues the next battle event, or null if empty.</summary>
     public BattleEvent? DequeueEvent()
     {
-        return _eventQueue.Count > 0 ? _eventQueue.Dequeue() : null;
+        if (_eventQueue.Count == 0) return null;
+        TotalDequeued++;
+        return _eventQueue.Dequeue();
     }
 
     /// <summary>Clears all pending events (called on battle start).</summary>
     public void Reset()
     {
         _eventQueue.Clear();
+        TotalQueued = 0;
+        TotalDequeued = 0;
         LastOutcome = BattleOutcome.Unknown;
         EnemyPetsRemaining = 0;
         FriendlyPetsRemaining = 0;
@@ -64,6 +78,12 @@ public class BattleEvent
     public string? SourcePet { get; set; }
     public string? TargetPet { get; set; }
     public int Damage { get; set; }
+
+    /// <summary>
+    /// Unique key for deduplication, based on event type + ItemIds + amounts.
+    /// Two events about different pets with the same name will have different keys.
+    /// </summary>
+    public string DedupKey { get; set; } = "";
 }
 
 public enum BattleEventType

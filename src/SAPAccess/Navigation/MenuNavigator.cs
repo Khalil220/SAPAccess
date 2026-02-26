@@ -284,26 +284,11 @@ public class MenuNavigator : MonoBehaviour
             _postBattleDelay -= Time.deltaTime;
             if (_postBattleDelay <= 0f)
             {
-                if (IsDialogOpen)
-                {
-                    _log?.LogInfo("Post-battle setup deferred — dialog is open");
-                }
-                else
+                if (!IsDialogOpen)
                 {
                     _needsPostBattleSetup = false;
                     PerformPostBattleSetup();
                 }
-            }
-        }
-
-        // Shop merge step 2 (stack newly bought pet onto target)
-        if (_needsMergeStep2 && phase == GamePhase.Shop)
-        {
-            _mergeStep2Delay -= Time.deltaTime;
-            if (_mergeStep2Delay <= 0f)
-            {
-                _needsMergeStep2 = false;
-                CompleteMergeStep2();
             }
         }
 
@@ -314,11 +299,7 @@ public class MenuNavigator : MonoBehaviour
             _shopRefreshDelay -= Time.deltaTime;
             if (_shopRefreshDelay <= 0f)
             {
-                if (IsDialogOpen)
-                {
-                    _log?.LogInfo("Shop refresh deferred — dialog is open");
-                }
-                else
+                if (!IsDialogOpen)
                 {
                     _needsShopRefresh = false;
                     RefreshShopState();
@@ -328,8 +309,15 @@ public class MenuNavigator : MonoBehaviour
 
         bool inMenu = phase != GamePhase.Shop && phase != GamePhase.Battle;
 
-        // Prevent Unity's EventSystem from routing keyboard input to UI elements
-        if (!IsEditing && (inMenu || IsDialogOpen || phase == GamePhase.Shop))
+        // Prevent Unity's EventSystem from routing keyboard input to UI elements.
+        // During Battle phase, only clear when TallyArenaMenu is active — earlier
+        // post-game screens (TallyArenaFinale, TallyArenaReward) rely on the
+        // EventSystem to wait for user input and auto-advance if we clear it.
+        // TallyArenaMenu needs clearing because the game auto-selects "Start New Game"
+        // which conflicts with our focus system.
+        bool shouldClearEventSystem = !IsEditing &&
+            (inMenu || IsDialogOpen || phase == GamePhase.Shop || _tallyMenuWasActive);
+        if (shouldClearEventSystem)
         {
             try
             {
@@ -793,11 +781,34 @@ public class MenuNavigator : MonoBehaviour
                 return;
             }
 
-            // Enter food targeting mode — user must select a team pet next
-            _pendingFood = spell;
-            _pendingFoodName = name;
-            ScreenReader.Instance.Say($"{name} selected. Press B, choose a target pet, then press Enter.");
-            _log?.LogInfo($"Food targeting started: {name}");
+            // Check if this food requires manual targeting
+            bool needsTarget = false;
+            try
+            {
+                needsTarget = Spacewood.Core.Actions.Board.BoardPartExtensions.CanAimSpell(board, spell);
+            }
+            catch (System.Exception ex)
+            {
+                _log?.LogWarning($"CanAimSpell check failed, assuming targeted: {ex.Message}");
+                needsTarget = true;
+            }
+
+            if (needsTarget)
+            {
+                // Enter food targeting mode — user must select a team pet next
+                _pendingFood = spell;
+                _pendingFoodName = name;
+                ScreenReader.Instance.Say($"{name} selected. Press B, choose a target pet, then press Enter.");
+                _log?.LogInfo($"Food targeting started (targeted): {name}");
+            }
+            else
+            {
+                // Non-targeted food — apply directly without asking for a target
+                hangar.PlaySpellAsync(spell, (Spacewood.Core.Models.MinionModel?)null);
+                ScreenReader.Instance.Say($"Bought {name}.");
+                _log?.LogInfo($"Food bought (non-targeted): {name}");
+                ScheduleShopRefresh();
+            }
         }
         catch (System.Exception ex)
         {
@@ -926,12 +937,6 @@ public class MenuNavigator : MonoBehaviour
             ScreenReader.Instance.Say("Focus a pet to merge.");
     }
 
-    // Pending shop merge: after buying, stack onto this team pet
-    private Spacewood.Core.Models.Item.ItemId? _pendingMergeTargetId;
-    private string? _pendingMergeName;
-    private bool _needsMergeStep2;
-    private float _mergeStep2Delay;
-
     private void MergeFromShop(Spacewood.Core.Models.MinionModel shopMinion, string shopName)
     {
         try
@@ -970,108 +975,17 @@ public class MenuNavigator : MonoBehaviour
                 return;
             }
 
-            // Count current team size to determine placement position
-            int teamSize = 0;
-            for (int i = 0; i < board.Minions.Items.Count; i++)
-            {
-                var m = board.Minions.Items[i];
-                if (m != null && !m.Dead) teamSize++;
-            }
+            // PlayMinionAsync onto the target's point — game auto-merges onto matching pet
+            _cachedHangar.PlayMinionAsync(shopMinion, target.Point, (Spacewood.Core.Models.MinionModel?)null);
 
-            if (teamSize >= 5)
-            {
-                ScreenReader.Instance.Say("Team is full. Sell a pet first to make room for merge.");
-                return;
-            }
-
-            // Step 1: Buy the pet to an empty slot
-            var emptyPoint = new Spacewood.Core.System.Point(teamSize, 0);
-            _cachedHangar.PlayMinionAsync(shopMinion, emptyPoint, null);
-
-            // Step 2: After a short delay, stack the newly bought pet onto the target
-            _pendingMergeTargetId = target.Id;
-            _pendingMergeName = targetName;
-            _needsMergeStep2 = true;
-            _mergeStep2Delay = 0.8f;
-
-            ScreenReader.Instance.Say($"Merging {shopName} onto {targetName}...");
-            _log?.LogInfo($"Shop merge step 1: bought {shopName}, will stack onto {targetName}");
+            ScreenReader.Instance.Say($"Merged {shopName} onto {targetName}.");
+            _log?.LogInfo($"Shop merge: {shopName} onto {targetName} at point ({target.Point.x},{target.Point.y})");
+            ScheduleShopRefresh();
         }
         catch (System.Exception ex)
         {
             _log?.LogError($"Shop merge error: {ex}");
             ScreenReader.Instance.Say("Merge failed.");
-        }
-    }
-
-    /// <summary>Step 2 of shop merge: find the newly bought pet and stack it onto the target.</summary>
-    private void CompleteMergeStep2()
-    {
-        if (_cachedHangar == null || _pendingMergeTargetId == null) return;
-
-        try
-        {
-            var board = _cachedHangar.BuildModel?.Board;
-            if (board?.Minions?.Items == null) return;
-
-            var targetId = _pendingMergeTargetId.Value;
-            var targetName = _pendingMergeName ?? "pet";
-
-            // Find the target pet to get its Enum
-            Spacewood.Core.Models.MinionModel? targetPet = null;
-            for (int i = 0; i < board.Minions.Items.Count; i++)
-            {
-                var m = board.Minions.Items[i];
-                if (m == null || m.Dead) continue;
-                if (m.Id.Unique == targetId.Unique)
-                {
-                    targetPet = m;
-                    break;
-                }
-            }
-
-            if (targetPet == null)
-            {
-                _log?.LogWarning("Merge step 2: target pet not found");
-                ScheduleShopRefresh();
-                return;
-            }
-
-            // Find the newly bought pet (same species, different ID from target)
-            Spacewood.Core.Models.MinionModel? newPet = null;
-            for (int i = 0; i < board.Minions.Items.Count; i++)
-            {
-                var m = board.Minions.Items[i];
-                if (m == null || m.Dead) continue;
-                if (m.Enum == targetPet.Enum && m.Id.Unique != targetId.Unique)
-                {
-                    newPet = m;
-                    break;
-                }
-            }
-
-            if (newPet == null)
-            {
-                _log?.LogWarning("Merge step 2: new pet not found (buy may have failed)");
-                ScheduleShopRefresh();
-                return;
-            }
-
-            _cachedHangar.StackMinionAsync(newPet, targetId);
-            ScreenReader.Instance.Say($"Merged onto {targetName}.");
-            _log?.LogInfo($"Shop merge step 2: stacked onto {targetName}");
-            ScheduleShopRefresh();
-        }
-        catch (System.Exception ex)
-        {
-            _log?.LogError($"Merge step 2 error: {ex}");
-            ScreenReader.Instance.Say("Merge failed.");
-            ScheduleShopRefresh();
-        }
-        finally
-        {
-            _pendingMergeTargetId = null;
-            _pendingMergeName = null;
         }
     }
 
@@ -1573,7 +1487,15 @@ public class MenuNavigator : MonoBehaviour
         if (!string.IsNullOrEmpty(above))
             announcement = above;
         if (!string.IsNullOrEmpty(below))
-            announcement += (announcement.Length > 0 ? ". " : "") + below;
+        {
+            if (announcement.Length > 0)
+            {
+                string sep = announcement.EndsWith(".") || announcement.EndsWith("!") || announcement.EndsWith("?")
+                    ? " " : ". ";
+                announcement += sep;
+            }
+            announcement += below;
+        }
         if (string.IsNullOrEmpty(announcement))
             announcement = "Tier rank up";
 

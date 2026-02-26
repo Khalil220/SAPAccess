@@ -14,6 +14,24 @@ public static class BattlePatches
 {
     private static readonly ManualLogSource Log = Logger.CreateLogSource("SAPAccess.BattlePatch");
 
+    /// <summary>Postfix on BattleController.Start — announces teams during intro animation,
+    /// well before combat begins. Boards are already loaded at this point.</summary>
+    [HarmonyPatch(typeof(Spacewood.Unity.MonoBehaviours.Battle.BattleController), nameof(Spacewood.Unity.MonoBehaviours.Battle.BattleController.Start))]
+    [HarmonyPostfix]
+    public static void BattleController_Start_Postfix(
+        Spacewood.Unity.MonoBehaviours.Battle.BattleController __instance)
+    {
+        try
+        {
+            Log.LogInfo("BattleController.Start — announcing teams");
+            BattleAnnouncer.Instance?.AnnounceTeamsEarly(__instance);
+        }
+        catch (System.Exception ex)
+        {
+            Log.LogError($"BattleController.Start postfix error: {ex}");
+        }
+    }
+
     /// <summary>Prefix on BoardController.PlayBattle — detects battle start.</summary>
     [HarmonyPatch(typeof(Spacewood.Unity.MonoBehaviours.Board.BoardController), nameof(Spacewood.Unity.MonoBehaviours.Board.BoardController.PlayBattle))]
     [HarmonyPrefix]

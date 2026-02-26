@@ -149,17 +149,21 @@ public class KeyboardHandler : MonoBehaviour
         }
 
         // Info keys (shop phase)
-        else if (inShop && WasPressed(KeyCode.T))
-        {
-            TeamAnnouncer.Instance?.AnnounceTeam();
-        }
         else if (inShop && WasPressed(KeyCode.S))
         {
             ShopAnnouncer.Instance?.AnnounceShop();
         }
+        else if (inShop && WasPressed(KeyCode.T))
+        {
+            ShopAnnouncer.Instance?.AnnounceTurn();
+        }
         else if (inShop && WasPressed(KeyCode.A))
         {
-            ShopAnnouncer.Instance?.AnnounceStatus();
+            ShopAnnouncer.Instance?.AnnounceGold();
+        }
+        else if (inShop && WasPressed(KeyCode.L))
+        {
+            ShopAnnouncer.Instance?.AnnounceLives();
         }
 
         // Escape: close dialog, cancel food targeting, go back in menus, or stop speech

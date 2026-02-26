@@ -233,4 +233,19 @@ public class ShopAnnouncer
     {
         ScreenReader.Instance.Say(_shop.GetStatusSummary());
     }
+
+    public void AnnounceTurn()
+    {
+        ScreenReader.Instance.Say($"Turn {_shop.Turn}.");
+    }
+
+    public void AnnounceGold()
+    {
+        ScreenReader.Instance.Say($"{_shop.Gold} gold.");
+    }
+
+    public void AnnounceLives()
+    {
+        ScreenReader.Instance.Say($"{_shop.Lives} lives.");
+    }
 }
