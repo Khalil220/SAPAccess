@@ -14,6 +14,7 @@ public class ModConfig
     public ConfigEntry<bool> AnnounceShopOnTurnStart { get; }
     public ConfigEntry<bool> BrailleOutput { get; }
     public ConfigEntry<float> SpeechDelay { get; }
+    public ConfigEntry<bool> ConfirmEndTurn { get; }
 
     public ModConfig(ConfigFile config)
     {
@@ -39,6 +40,10 @@ public class ModConfig
         SpeechDelay = config.Bind(
             "Speech", "SpeechDelay", 0.1f,
             "Minimum delay in seconds between speech announcements during battle.");
+
+        ConfirmEndTurn = config.Bind(
+            "Shop", "ConfirmEndTurn", true,
+            "Prompt for confirmation before ending turn when you have unspent gold. Toggle with F2.");
     }
 }
 

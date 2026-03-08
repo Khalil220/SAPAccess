@@ -20,6 +20,12 @@ public class FocusManager
     private int _currentElementIndex;
     private int _currentInfoRow;
 
+    // Dwell timer for tooltip announcement
+    private FocusElement? _dwellElement;
+    private float _dwellTimer;
+    private bool _dwellAnnounced;
+    private const float DwellDelay = 2.0f;
+
     public FocusElement? CurrentElement
     {
         get
@@ -80,26 +86,29 @@ public class FocusManager
         _currentElementIndex = 0;
         _currentInfoRow = 0;
 
+        bool groupFound = false;
         for (int i = 0; i < _groups.Count; i++)
         {
             if (_groups[i].Name == groupName)
             {
                 _currentGroupIndex = i;
+                groupFound = true;
                 break;
             }
         }
 
-        // Restore element index (clamped to new group size)
-        if (_groups.Count > 0)
+        // Only restore element index when the target group was actually found;
+        // otherwise start at element 0 to avoid applying a stale index to an unrelated group.
+        if (groupFound && _groups.Count > 0)
         {
             var group = _groups[_currentGroupIndex];
             _currentElementIndex = Math.Min(elementIndex, Math.Max(0, group.Elements.Count - 1));
         }
 
-        // Announce restored position with queued speech so it follows "Selected: X"
-        var curGroup = CurrentGroup;
+        // Announce restored position without group name prefix — the page title
+        // was already announced by the menu patch, so repeating it is redundant.
         var element = CurrentElement;
-        if (curGroup != null && element != null)
+        if (element != null)
         {
             string elementText;
             if (element.InfoRows != null && element.InfoRows.Count > 0)
@@ -107,7 +116,7 @@ public class FocusManager
             else
                 elementText = element.GetDescription();
 
-            ScreenReader.Instance.Say($"{curGroup.Name}. {elementText}");
+            ScreenReader.Instance.Say(elementText);
         }
 
         FocusChanged?.Invoke(CurrentElement);
@@ -159,6 +168,31 @@ public class FocusManager
         _currentGroupIndex = 0;
         _currentElementIndex = 0;
         _currentInfoRow = 0;
+    }
+
+    /// <summary>Called each frame to advance the dwell timer for tooltip announcements.</summary>
+    public void Tick(float deltaTime)
+    {
+        var element = CurrentElement;
+        if (element != _dwellElement)
+        {
+            // Focus changed — reset dwell timer
+            _dwellElement = element;
+            _dwellTimer = 0f;
+            _dwellAnnounced = false;
+            return;
+        }
+
+        if (_dwellAnnounced || element == null) return;
+        if (string.IsNullOrEmpty(element.Tooltip)) return;
+
+        _dwellTimer += deltaTime;
+        if (_dwellTimer >= DwellDelay)
+        {
+            _dwellAnnounced = true;
+            ScreenReader.Instance.Say(element.Tooltip!);
+            _log.LogDebug($"Dwell tooltip: {element.Tooltip}");
+        }
     }
 
     /// <summary>Move focus left (previous element in current group). Resets info row to 0.</summary>
@@ -425,6 +459,12 @@ public class FocusElement
     /// </summary>
     public List<string>? InfoRows { get; set; }
 
+    /// <summary>
+    /// Tooltip text announced after dwelling on this element for 2 seconds.
+    /// Pulled from the game's own tooltip data. Null/empty = no tooltip.
+    /// </summary>
+    public string? Tooltip { get; set; }
+
     public FocusElement(string label, int slotIndex = -1)
     {
         Label = label;
@@ -448,6 +488,8 @@ public class FocusElement
 
         if (Type == "editbox")
             desc += ". Edit box. Press Enter to edit.";
+        else if (Type == "slider")
+            desc += ". Slider. Press Enter to adjust.";
         else if (Type == "button")
             desc += ". Button.";
         return desc;

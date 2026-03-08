@@ -153,7 +153,17 @@ public class BattleAnnouncer : MonoBehaviour
             }
         }
 
-        ScreenReader.Instance.SayQueued("Battle starting.");
+        // Announce auto-play state so the user knows whether to press Next or wait
+        string autoMsg = "Battle starting.";
+        try
+        {
+            var persistKey = (Spacewood.Scripts.Utilities.PersistKey)3; // BattleAutoPlay
+            bool autoPlay = Spacewood.Scripts.Utilities.Persist.Get<bool>(persistKey);
+            if (!autoPlay)
+                autoMsg = "Battle starting. Auto-play off, press Enter to advance, P to toggle.";
+        }
+        catch { }
+        ScreenReader.Instance.SayQueued(autoMsg);
         _battleActive = true;
     }
 

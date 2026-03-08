@@ -16,8 +16,35 @@ public class ShopAnnouncer
     private readonly ManualLogSource _log;
     private readonly ShopStateReader _shop;
 
-    /// <summary>Cached reference to the game's hangar controller, set by MenuNavigator.</summary>
-    public Spacewood.Unity.MonoBehaviours.Build.HangarMain? Hangar { get; set; }
+    /// <summary>Cached reference to the game's hangar controller, set by MenuNavigator.
+    /// If null or destroyed, attempts to re-find it in the scene.</summary>
+    public Spacewood.Unity.MonoBehaviours.Build.HangarMain? Hangar
+    {
+        get
+        {
+            // Re-detect if null or if the underlying IL2CPP object was destroyed
+            if (_hangar == null || !IsAlive(_hangar))
+            {
+                try
+                {
+                    _hangar = UnityEngine.Object.FindObjectOfType<Spacewood.Unity.MonoBehaviours.Build.HangarMain>();
+                    if (_hangar != null)
+                        _log.LogInfo("HangarMain re-detected in ShopAnnouncer");
+                }
+                catch { _hangar = null; }
+            }
+            return _hangar;
+        }
+        set => _hangar = value;
+    }
+    private Spacewood.Unity.MonoBehaviours.Build.HangarMain? _hangar;
+
+    /// <summary>Checks whether a Unity Object is still alive (not destroyed).</summary>
+    private static bool IsAlive(UnityEngine.Object? obj)
+    {
+        try { return obj != null; }
+        catch { return false; }
+    }
 
     public ShopAnnouncer()
     {
@@ -28,6 +55,7 @@ public class ShopAnnouncer
 
     public void OnTurnStart()
     {
+        ResetActionGuards();
         var sr = ScreenReader.Instance;
         sr.Say($"Turn {_shop.Turn}. {_shop.Gold} gold. {_shop.Lives} lives.");
 
@@ -58,10 +86,42 @@ public class ShopAnnouncer
         ScreenReader.Instance.Say($"{petName} leveled up to level {newLevel}!");
     }
 
+    // ── Action guards ─────────────────────────────────────────────────
+    // Prevent double-triggering async actions before the server responds.
+
+    private bool _endTurnInProgress;
+    private bool _rollInProgress;
+    private bool _sellInProgress;
+    public bool BuyInProgress { get; set; }
+
+    /// <summary>True when the end-turn confirmation prompt is showing.</summary>
+    public bool EndTurnConfirmPending { get; private set; }
+
+    /// <summary>Resets all action guards. Called on turn start when a new turn begins.</summary>
+    public void ResetActionGuards()
+    {
+        _endTurnInProgress = false;
+        _rollInProgress = false;
+        _sellInProgress = false;
+        BuyInProgress = false;
+        EndTurnConfirmPending = false;
+    }
+
+    /// <summary>Resets roll and sell guards after shop refresh completes.</summary>
+    public void ResetRollAndSellGuards()
+    {
+        _rollInProgress = false;
+        _sellInProgress = false;
+        BuyInProgress = false;
+    }
+
     // ── Keyboard-triggered actions ──────────────────────────────────────
 
     public void Roll()
     {
+        if (_rollInProgress)
+            return;
+
         if (Hangar == null)
         {
             ScreenReader.Instance.Say("Cannot roll.");
@@ -83,6 +143,7 @@ public class ShopAnnouncer
 
         try
         {
+            _rollInProgress = true;
             Hangar.RollShopAsync();
             _log.LogInfo("Roll executed");
             // Don't announce gold here — it's stale (board hasn't deducted yet).
@@ -91,6 +152,7 @@ public class ShopAnnouncer
         }
         catch (System.Exception ex)
         {
+            _rollInProgress = false;
             _log.LogError($"Roll error: {ex}");
             ScreenReader.Instance.Say("Roll failed.");
         }
@@ -144,6 +206,16 @@ public class ShopAnnouncer
 
     public void EndTurn()
     {
+        if (_endTurnInProgress)
+            return;
+
+        if (EndTurnConfirmPending)
+        {
+            // E pressed again while prompt is showing — treat as confirm
+            ConfirmEndTurn();
+            return;
+        }
+
         if (Hangar == null)
         {
             ScreenReader.Instance.Say("Cannot end turn.");
@@ -172,14 +244,55 @@ public class ShopAnnouncer
         }
         catch { }
 
+        // Check if confirmation is needed (gold > 0 and setting enabled)
+        if (Config.ModConfig.Instance?.ConfirmEndTurn.Value == true)
+        {
+            try
+            {
+                int gold = _shop.Gold;
+                if (gold > 0)
+                {
+                    EndTurnConfirmPending = true;
+                    ScreenReader.Instance.Say($"End turn with {gold} gold remaining? Press E or Enter to confirm, Escape to cancel.");
+                    _log.LogInfo($"End turn confirmation prompt ({gold} gold remaining)");
+                    Navigation.MenuNavigator.Instance?.ShowEndTurnConfirm(gold);
+                    return;
+                }
+            }
+            catch { }
+        }
+
+        ExecuteEndTurn();
+    }
+
+    /// <summary>Confirms the end-turn action from the prompt.</summary>
+    public void ConfirmEndTurn()
+    {
+        EndTurnConfirmPending = false;
+        Navigation.MenuNavigator.Instance?.DismissEndTurnConfirm();
+        ExecuteEndTurn();
+    }
+
+    /// <summary>Cancels the end-turn prompt and returns to shop.</summary>
+    public void CancelEndTurn()
+    {
+        EndTurnConfirmPending = false;
+        Navigation.MenuNavigator.Instance?.DismissEndTurnConfirm();
+        ScreenReader.Instance.Say("End turn cancelled.");
+    }
+
+    private void ExecuteEndTurn()
+    {
         try
         {
+            _endTurnInProgress = true;
             ScreenReader.Instance.Say("Ending turn.");
             Hangar.EndTurnAsync();
             _log.LogInfo("End turn executed");
         }
         catch (System.Exception ex)
         {
+            _endTurnInProgress = false;
             _log.LogError($"End turn error: {ex}");
             ScreenReader.Instance.Say("End turn failed.");
         }
@@ -187,6 +300,9 @@ public class ShopAnnouncer
 
     public void Sell()
     {
+        if (_sellInProgress)
+            return;
+
         if (Hangar == null)
         {
             ScreenReader.Instance.Say("Cannot sell.");
@@ -206,6 +322,7 @@ public class ShopAnnouncer
         {
             try
             {
+                _sellInProgress = true;
                 string name = element.Label;
                 Hangar.SellMinionAsync(minion);
                 ScreenReader.Instance.Say($"Sold {name}.");
@@ -214,6 +331,7 @@ public class ShopAnnouncer
             }
             catch (System.Exception ex)
             {
+                _sellInProgress = false;
                 _log.LogError($"Sell error: {ex}");
                 ScreenReader.Instance.Say("Sell failed.");
             }
@@ -247,5 +365,64 @@ public class ShopAnnouncer
     public void AnnounceLives()
     {
         ScreenReader.Instance.Say($"{_shop.Lives} lives.");
+    }
+
+    /// <summary>Announces the remaining turn timer. Returns true if a timer was active.</summary>
+    public bool AnnounceTimer()
+    {
+        try
+        {
+            var versus = Hangar?.MatchModel?.Versus;
+            if (versus == null)
+            {
+                ScreenReader.Instance.Say("No timer.");
+                return false;
+            }
+
+            // Check if this match has a meaningful turn timer.
+            // Async matches use very long durations (e.g. 86400s = 24 hours) where
+            // the timer is irrelevant — players end turns manually.
+            int turnDuration = 0;
+            try { turnDuration = versus.TurnDuration; } catch { }
+            if (turnDuration <= 0 || turnDuration > 300)
+            {
+                ScreenReader.Instance.Say("No timer.");
+                return false;
+            }
+
+            var turnEndTime = versus.TurnEndTime;
+            if (!turnEndTime.HasValue)
+            {
+                ScreenReader.Instance.Say("No timer.");
+                return false;
+            }
+
+            // Convert Il2CppSystem.DateTime to System.DateTime via ticks
+            long endTicks = turnEndTime.Value.Ticks;
+            var endTimeUtc = new System.DateTime(endTicks, System.DateTimeKind.Utc);
+            var remaining = endTimeUtc.Subtract(System.DateTime.UtcNow);
+            if (remaining.TotalSeconds <= 0)
+            {
+                ScreenReader.Instance.Say("Time's up.");
+                return true;
+            }
+
+            int minutes = (int)remaining.TotalMinutes;
+            int seconds = remaining.Seconds;
+
+            string timeText;
+            if (minutes > 0)
+                timeText = $"{minutes} minute{(minutes != 1 ? "s" : "")}, {seconds} second{(seconds != 1 ? "s" : "")} remaining.";
+            else
+                timeText = $"{seconds} second{(seconds != 1 ? "s" : "")} remaining.";
+
+            ScreenReader.Instance.Say(timeText);
+            return true;
+        }
+        catch (System.Exception ex)
+        {
+            _log.LogError($"Timer announce error: {ex.Message}");
+            return false;
+        }
     }
 }

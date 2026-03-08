@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using BepInEx.Logging;
 using SAPAccess.NVDA;
 
@@ -36,9 +37,17 @@ public class MenuAnnouncer
         ScreenReader.Instance.Say(text);
     }
 
+    private static readonly Dictionary<string, string> _pageNames = new()
+    {
+        { "VersusCreator", "Create private match" },
+        { "VersusFront", "Private match" },
+        { "VersusLobby", "Match lobby" },
+    };
+
     public void OnPageChanged(string pageName)
     {
-        ScreenReader.Instance.Say(pageName);
+        string friendly = _pageNames.TryGetValue(pageName, out var name) ? name : pageName;
+        ScreenReader.Instance.Say(friendly);
     }
 
     public void OnGameOver(int wins, int lives)
@@ -47,11 +56,6 @@ public class MenuAnnouncer
             ? $"Game over. You finished with {wins} wins."
             : $"Game over. {wins} wins, {lives} lives remaining.";
         ScreenReader.Instance.Say(msg);
-    }
-
-    public void OnSettingsOpened()
-    {
-        ScreenReader.Instance.Say("Settings.");
     }
 
     public void OnResultsScreen(int wins, int lives, string? reward)
