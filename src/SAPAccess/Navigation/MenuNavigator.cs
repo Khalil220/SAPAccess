@@ -3600,7 +3600,7 @@ public class MenuNavigator : MonoBehaviour
         {
             if (_cachedDesyncAlert == null)
             {
-                try { _cachedDesyncAlert = Spacewood.Unity.DesyncAlert.Instance; } catch { }
+                try { _cachedDesyncAlert = Object.FindObjectOfType<Spacewood.Unity.DesyncAlert>(); } catch { }
                 if (_cachedDesyncAlert == null) return;
             }
 
