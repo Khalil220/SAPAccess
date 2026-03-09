@@ -3202,7 +3202,19 @@ public class MenuNavigator : MonoBehaviour
                     try
                     {
                         var model = item.Model;
-                        if (model?.Minion != null)
+                        // Check Spell first — toys/relics are spells and may also have a
+                        // placeholder Minion with bogus attack/health (e.g. 1000/1).
+                        if (model?.Spell != null)
+                        {
+                            name = GetSpellName(model.Spell);
+                            rows.Add(name);
+
+                            string? spellAbility = null;
+                            try { spellAbility = Spacewood.Unity.Extensions.SpellModelExtensions.GetAbilityLocalized(model.Spell); } catch { }
+                            if (!string.IsNullOrWhiteSpace(spellAbility))
+                                rows.Add(StripRichText(spellAbility!));
+                        }
+                        else if (model?.Minion != null)
                         {
                             name = GetMinionName(model.Minion);
                             rows.Add(name);
@@ -3215,16 +3227,6 @@ public class MenuNavigator : MonoBehaviour
                             try { ability = Spacewood.Unity.Extensions.MinionModelExtensions.GetAbilityLocalized(model.Minion); } catch { }
                             if (!string.IsNullOrWhiteSpace(ability))
                                 rows.Add(StripRichText(ability!));
-                        }
-                        else if (model?.Spell != null)
-                        {
-                            name = GetSpellName(model.Spell);
-                            rows.Add(name);
-
-                            string? spellAbility = null;
-                            try { spellAbility = Spacewood.Unity.Extensions.SpellModelExtensions.GetAbilityLocalized(model.Spell); } catch { }
-                            if (!string.IsNullOrWhiteSpace(spellAbility))
-                                rows.Add(StripRichText(spellAbility!));
                         }
                     }
                     catch { }
@@ -6097,6 +6099,13 @@ public class MenuNavigator : MonoBehaviour
     /// <summary>Closes the currently open dialog (DeckViewer, Alert, Picker).</summary>
     public void DismissCurrentDialog()
     {
+        // Chooser (toy/relic selection) — cannot be dismissed, selection is mandatory
+        if (_chooserWasActive)
+        {
+            _log?.LogInfo("Chooser is active — Escape blocked (selection is mandatory)");
+            return;
+        }
+
         // DeckViewer (pack preview)
         try
         {
