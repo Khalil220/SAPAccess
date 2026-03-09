@@ -26,17 +26,11 @@ SAPAccess adds full keyboard navigation and NVDA speech output to Super Auto Pet
 
 ### For Users
 
-1. **Install BepInEx 6** into the Super Auto Pets game directory:
-   - Download `BepInEx-Unity.IL2CPP-win-x64` from [BepInEx releases](https://github.com/BepInEx/BepInEx/releases)
-   - Extract the contents into the game folder (`Steam/steamapps/common/Super Auto Pets/`)
-   - Launch the game once and close it so BepInEx generates its files
-
-2. **Install SAPAccess**:
-   - Download `SAPAccess.dll` from the [Releases](https://github.com/Khalil220/SAPAccess/releases) page
-   - Place it in `Super Auto Pets/BepInEx/plugins/SAPAccess/`
-   - Copy `nvdaControllerClient64.dll` to the game root directory (`Super Auto Pets/`)
-
+1. **Download** the latest `SAPAccess-v*.zip` from the [Releases](https://github.com/Khalil220/SAPAccess/releases) page
+2. **Extract** the contents into the Super Auto Pets game directory (`Steam/steamapps/common/Super Auto Pets/`)
 3. **Launch the game** with NVDA running. You should hear "SAPAccess loaded" on startup.
+
+The release zip includes BepInEx, the SAPAccess plugin, and the NVDA controller DLL — no separate downloads needed.
 
 ### Troubleshooting
 
