@@ -218,7 +218,7 @@ Contributions are welcome. Here's how to get started:
 
 ## License
 
-This project is not yet licensed. All rights reserved until a license is chosen.
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
 
 ## Acknowledgments
 
