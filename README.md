@@ -76,9 +76,9 @@ SAPAccess adds full keyboard navigation and NVDA speech output to Super Auto Pet
 | G | Jump to shop |
 | B | Jump to team |
 | S | Shop summary |
-| T | Team summary |
-| A | Gold, lives, and turn info |
+| A | Gold |
 | L | Lives |
+| T | Turn info |
 | Q | Turn timer |
 | Shift + Left/Right | Reposition team pet |
 
