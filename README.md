@@ -26,7 +26,7 @@ SAPAccess adds full keyboard navigation and NVDA speech output to Super Auto Pet
 
 ### For Users
 
-1. **Download** the latest `SAPAccess-v*.zip` from the [Releases](https://github.com/Khalil220/SAPAccess/releases) page
+1. **Download** the latest `SAPAccess.zip` from the [Releases](https://github.com/Khalil220/SAPAccess/releases) page
 2. **Extract** the contents into the Super Auto Pets game directory (`Steam/steamapps/common/Super Auto Pets/`)
 3. **Launch the game** with NVDA running. You should hear "SAPAccess loaded" on startup.
 
