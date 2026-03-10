@@ -66,7 +66,7 @@ The release zip includes BepInEx, the SAPAccess plugin, and the NVDA controller 
 | E | End turn |
 | F | Freeze / unfreeze item |
 | X | Sell focused team pet |
-| M | Merge shop pet onto matching team pet |
+| M | Merge matching pets (shop onto team, or team onto team) |
 | G | Jump to shop |
 | B | Jump to team |
 | S | Shop summary |
