@@ -3422,6 +3422,10 @@ public class MenuNavigator : MonoBehaviour
                 var detailsRect = cart.Details;
                 if (detailsRect != null)
                 {
+                    // Collect the Back button's label so we can exclude it from info rows.
+                    UnityEngine.Transform? backBtnTransform = null;
+                    try { backBtnTransform = cart.BackButton?.transform; } catch { }
+
                     var texts = detailsRect.GetComponentsInChildren<TMPro.TextMeshProUGUI>(false);
                     if (texts != null)
                     {
@@ -3429,9 +3433,16 @@ public class MenuNavigator : MonoBehaviour
                         {
                             try
                             {
-                                string? t = texts[i]?.text;
-                                if (!string.IsNullOrWhiteSpace(t))
-                                    infoRows.Add(t!);
+                                var tmp = texts[i];
+                                if (tmp == null) continue;
+                                string? t = tmp.text;
+                                if (string.IsNullOrWhiteSpace(t)) continue;
+
+                                // Skip text that belongs to the Back button
+                                if (backBtnTransform != null && tmp.transform.IsChildOf(backBtnTransform))
+                                    continue;
+
+                                infoRows.Add(t!);
                             }
                             catch { }
                         }
