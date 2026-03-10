@@ -206,7 +206,7 @@ Contributions are welcome. Here's how to get started:
 
 - Additional game mode support (new packs, events, seasonal content)
 - Localization and multi-language screen reader support
-- Support for other screen readers (JAWS, Narrator)
+- Support for other screen readers (JAWS) and SAPI fallback
 - Improved battle narration detail and pacing
 - UI sound cues for navigation feedback
 
